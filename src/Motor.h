@@ -2,6 +2,11 @@
 
 #include <Arduino.h>
 
+struct PulseSnapshot {
+  long left;
+  long right;
+};
+
 /**
  * @brief Khởi tạo các chân IO và Ngắt cho động cơ và Encoder.
  */
@@ -33,3 +38,5 @@ void brakeMotors();
  * Chống tụt áp do dòng khởi động quá cao.
  */
 int applyRateLimit(int pwmNew, int pwmPrev);
+int applyRateLimit(int pwmNew, int pwmPrev, int rateLimit);
+PulseSnapshot getPulseSnapshot();

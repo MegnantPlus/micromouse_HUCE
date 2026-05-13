@@ -1,10 +1,9 @@
 /*
- * ================================================================
- * MICROMOUSE — ESP32-S3 — BÁM TƯỜNG ĐỘC LẬP + MAHONY FILTER
- * ================================================================
+ * MICROMOUSE - ESP32-S3 - independent wall following + Mahony filter
  */
 
 #include <Arduino.h>
+#include <esp_task_wdt.h>
 #include "Config.h"
 #include "Globals.h"
 #include "IMU.h"
@@ -12,50 +11,79 @@
 #include "Motor.h"
 #include "Web.h"
 
+namespace
+{
+const int SENSOR_L = 0;
+const int SENSOR_FL = 1;
+const int SENSOR_FR = 2;
+const int SENSOR_R = 3;
+const int FRONT_STOP_SENSOR_LEFT = SENSOR_L;
+const int FRONT_STOP_SENSOR_RIGHT = SENSOR_R;
+
+const int CONTROL_PERIOD_MS = 10;
+const float CONTROL_DT_SECONDS = CONTROL_PERIOD_MS / 1000.0f;
+const int SENSOR_DELTA_PWM_GAIN = 2;
+const int FRONT_STOP_EARLY_MARGIN = 1000;
+const int FRONT_STOP_BRAKE_RAMP_MULTIPLIER = 3;
+const uint32_t MAIN_CONTROL_STACK_SIZE = 8192;
+const uint32_t CONTROL_TASK_WDT_TIMEOUT_SECONDS = 2;
+const uint32_t CONTROL_LOOP_SOFT_TIMEOUT_MS = 50;
+
 long lastSpeedPulseL = 0;
 long lastSpeedPulseR = 0;
+
+void changeState(RunState newState);
 
 long absPulse(long value)
 {
   return value < 0 ? -value : value;
 }
 
-bool isFrontSensorReady(int sensorIndex)
+int sensorValueByIndex(const IrSnapshot &ir, int sensorIndex)
 {
-  int frontMargin = max(50, ir_deadband / 2);
-  return max_IR[sensorIndex] < 4095 - frontMargin;
+  switch (sensorIndex)
+  {
+  case SENSOR_L:
+    return ir.left;
+  case SENSOR_FL:
+    return ir.frontLeft;
+  case SENSOR_FR:
+    return ir.frontRight;
+  case SENSOR_R:
+    return ir.right;
+  default:
+    return 0;
+  }
 }
 
-bool isSideSensorClose(int sensorIndex)
+bool isSensorCalibrated(int sensorIndex, const RuntimeParams &cfg)
 {
-  int sideRef = (sensorIndex == 0) ? side_ref_L : side_ref_R;
-  int sideValue = (sensorIndex == 0) ? ir_L : ir_R;
-  if (sideRef >= 4095)
-    return false;
-  return sideValue > sideRef + max(15, ir_deadband / 4);
+  int margin = max(50, cfg.ir_deadband / 2);
+  return max_IR[sensorIndex] < 4095 - margin;
 }
 
-int frontCorrectionStart(int sensorIndex)
+int frontCorrectionStart(int sensorIndex, const RuntimeParams &cfg)
 {
-  if (!isFrontSensorReady(sensorIndex))
+  if (!isSensorCalibrated(sensorIndex, cfg))
     return 4095;
-  return constrain(max_IR[sensorIndex] + offset_upper, 0, 4095);
+  return constrain(max_IR[sensorIndex] + cfg.offset_upper, 0, 4095);
 }
 
-int frontEmergencyStart(int sensorIndex)
+bool isFrontWallDetected(const IrSnapshot &ir, const RuntimeParams &cfg)
 {
-  int emergencyMargin = max(120, offset_upper);
-  if (!isFrontSensorReady(sensorIndex))
-    return 4095;
-  return constrain(max_IR[sensorIndex] + emergencyMargin, 0, 4095);
-}
+  int leftThreshold = max(0, frontCorrectionStart(FRONT_STOP_SENSOR_LEFT, cfg) -
+                                 FRONT_STOP_EARLY_MARGIN);
+  int rightThreshold = max(0, frontCorrectionStart(FRONT_STOP_SENSOR_RIGHT, cfg) -
+                                  FRONT_STOP_EARLY_MARGIN);
 
-bool isFrontWallDetected()
-{
-  bool flWarn = isFrontSensorReady(0) && ir_FL > frontCorrectionStart(0);
-  bool frWarn = isFrontSensorReady(3) && ir_FR > frontCorrectionStart(3);
+  bool frontLeftWarn = isSensorCalibrated(FRONT_STOP_SENSOR_LEFT, cfg) &&
+                       sensorValueByIndex(ir, FRONT_STOP_SENSOR_LEFT) >
+                           leftThreshold;
+  bool frontRightWarn = isSensorCalibrated(FRONT_STOP_SENSOR_RIGHT, cfg) &&
+                        sensorValueByIndex(ir, FRONT_STOP_SENSOR_RIGHT) >
+                            rightThreshold;
 
-  return flWarn && frWarn;
+  return frontLeftWarn && frontRightWarn;
 }
 
 int computeWheelSpeedPid(float targetSpeed, float actualSpeed, float kp, float ki,
@@ -72,19 +100,24 @@ int computeWheelSpeedPid(float targetSpeed, float actualSpeed, float kp, float k
   return (int)(kp * error + ki * integral + kd * dFilter);
 }
 
-int keepMotorRunningPwm(int pwm)
+int keepMotorRunningPwm(int pwm, const RuntimeParams &cfg)
 {
-  return constrain(pwm, Turn_Min, Turn_Max);
+  return constrain(pwm, cfg.Turn_Min, cfg.Turn_Max);
 }
 
-int sideWallCorrectionStart(int sensorIndex)
+int sideReferenceByIndex(int sensorIndex)
 {
-  int sideRef = (sensorIndex == 0) ? side_ref_L : side_ref_R;
+  return (sensorIndex == SENSOR_L) ? side_ref_L : side_ref_R;
+}
+
+int sideWallCorrectionStart(int sensorIndex, const RuntimeParams &cfg)
+{
+  int sideRef = sideReferenceByIndex(sensorIndex);
   if (sideRef < 4095)
     return sideRef;
-  if (max_IR[sensorIndex] >= 4095 - max(10, offset_upper))
+  if (max_IR[sensorIndex] >= 4095 - max(10, cfg.offset_upper))
     return 4095;
-  return constrain(max_IR[sensorIndex] + offset_upper, 0, 4095);
+  return constrain(max_IR[sensorIndex] + cfg.offset_upper, 0, 4095);
 }
 
 int sideErrorDeadband()
@@ -92,24 +125,24 @@ int sideErrorDeadband()
   return 0;
 }
 
-int sideCorrectionKick()
+int sideCorrectionKick(const RuntimeParams &cfg)
 {
-  return constrain(Turn_Min, 25, 45);
+  return constrain(cfg.Turn_Min, 25, 45);
 }
 
-int sideCloseDirection(int sensorIndex, int sideRef)
+int sideCloseDirection(int sensorIndex, int sideRef, const RuntimeParams &cfg)
 {
   int deadband = sideErrorDeadband();
   int wallRaw = -1;
   int emptyRaw = -1;
 
-  if (max_IR[sensorIndex] < 4095 - max(10, offset_upper))
+  if (max_IR[sensorIndex] < 4095 - max(10, cfg.offset_upper))
   {
-    wallRaw = constrain(max_IR[sensorIndex] + offset_upper, 0, 4095);
+    wallRaw = constrain(max_IR[sensorIndex] + cfg.offset_upper, 0, 4095);
   }
-  if (min_IR[sensorIndex] > max(10, offset_lower))
+  if (min_IR[sensorIndex] > max(10, cfg.offset_lower))
   {
-    emptyRaw = constrain(min_IR[sensorIndex] - offset_lower, 0, 4095);
+    emptyRaw = constrain(min_IR[sensorIndex] - cfg.offset_lower, 0, 4095);
   }
 
   if (wallRaw >= 0 && abs(wallRaw - sideRef) > deadband)
@@ -123,96 +156,152 @@ int sideCloseDirection(int sensorIndex, int sideRef)
   return 1;
 }
 
-int sideCloseError(int sensorIndex)
+int sideCloseError(int sensorIndex, const IrSnapshot &ir, const RuntimeParams &cfg)
 {
-  int sideRef = sideWallCorrectionStart(sensorIndex);
+  int sideRef = sideWallCorrectionStart(sensorIndex, cfg);
   if (sideRef >= 4095)
     return 0;
 
-  int sideValue = (sensorIndex == 0) ? ir_L : ir_R;
-  int direction = sideCloseDirection(sensorIndex, sideRef);
+  int sideValue = sensorValueByIndex(ir, sensorIndex);
+  int direction = sideCloseDirection(sensorIndex, sideRef, cfg);
   int error = (direction > 0) ? (sideValue - sideRef) : (sideRef - sideValue);
 
   return (error > sideErrorDeadband()) ? error : 0;
 }
 
-int correctFromSideWalls()
+int correctFromSideWalls(const IrSnapshot &ir, const RuntimeParams &cfg)
 {
-  int leftError = sideCloseError(1);
-  int rightError = sideCloseError(2);
+  int leftError = sideCloseError(SENSOR_L, ir, cfg);
+  int rightError = sideCloseError(SENSOR_R, ir, cfg);
   if (leftError == 0 && rightError == 0)
     return 0;
 
-  int rawSteer = leftError - rightError; // Duong: ne tuong trai, am: ne tuong phai
-  int steer = (int)(rawSteer * k_ir);
+  int rawSteer = leftError - rightError;
+  int steer = (int)(rawSteer * cfg.k_ir);
   if (steer > 0)
-    steer = max(steer, sideCorrectionKick());
+    steer = max(steer, sideCorrectionKick(cfg));
   else if (steer < 0)
-    steer = min(steer, -sideCorrectionKick());
+    steer = min(steer, -sideCorrectionKick(cfg));
 
-  return constrain(steer, -(Turn_Max - Turn_Min), Turn_Max - Turn_Min);
+  return constrain(steer, -(cfg.Turn_Max - cfg.Turn_Min),
+                   cfg.Turn_Max - cfg.Turn_Min);
 }
 
-// Biến lưu thời gian chạy task
-TickType_t xLastWakeTime;
-const TickType_t xFrequency = 10 / portTICK_PERIOD_MS; // Chu kỳ 10ms (100Hz)
+void resetWheelPidMemory()
+{
+  PulseSnapshot pulses = getPulseSnapshot();
+  integralL = integralR = prevErrL = prevErrR = dFilterL = dFilterR = 0.0f;
+  integralT = prevErrT = dFilterT = 0.0f;
+  lastSpeedPulseL = pulses.left;
+  lastSpeedPulseR = pulses.right;
+}
 
-// ==============================================================================
-// HÀM CHUYỂN TRẠNG THÁI (TRÁNH RÒ RỈ TRẠNG THÁI)
-// ==============================================================================
+void resetRunProfileAndPidMemory()
+{
+  virtualPos = 0.0f;
+  virtualVel = 0.0f;
+  resetWheelPidMemory();
+}
+
+bool applyPendingRuntimeParamsAtSafePoint()
+{
+  if (carState != IDLE)
+    return false;
+
+  RuntimeParams params;
+  if (!consumePendingRuntimeParams(params))
+    return false;
+
+  applyActiveRuntimeParams(params);
+  resetRunProfileAndPidMemory();
+  return true;
+}
+
+void setupControlTaskWatchdog()
+{
+  esp_task_wdt_init(CONTROL_TASK_WDT_TIMEOUT_SECONDS, true);
+  esp_task_wdt_add(nullptr);
+}
+
+void feedControlTaskWatchdog()
+{
+  esp_task_wdt_reset();
+}
+
+void finishControlLoop(uint32_t loopStartMs)
+{
+  uint32_t elapsedMs = millis() - loopStartMs;
+  controlTaskLastLoopMs = elapsedMs;
+
+  if (elapsedMs > CONTROL_LOOP_SOFT_TIMEOUT_MS)
+  {
+    controlTaskOverrunCount++;
+    changeState(IDLE);
+  }
+
+  feedControlTaskWatchdog();
+}
+
 void changeState(RunState newState)
 {
   if (carState == newState)
+  {
+    if (newState == IDLE)
+      applyPendingRuntimeParamsAtSafePoint();
     return;
+  }
 
-  // Dọn dẹp PWM và PID cũ trước khi sang state mới
+  if (carState == IDLE)
+    applyPendingRuntimeParamsAtSafePoint();
+
   resetMotorsAndPID();
+  resetRunProfileAndPidMemory();
 
   carState = newState;
   stateStartTime = millis();
 
-  // Xử lý một số cấu hình riêng theo trạng thái
   switch (newState)
   {
   case PID_RUN:
-    lastSpeedPulseL = pulseL;
-    lastSpeedPulseR = pulseR;
+    resetWheelPidMemory();
     virtualVel = 0.0f;
     virtualPos = 0.0f;
-    target_yaw = continuousYaw; // Lưu góc hiện tại làm mục tiêu
+    target_yaw = continuousYaw;
     isRunning = true;
-    pixels.setPixelColor(0, pixels.Color(0, 255, 0)); // XANH LÁ: Đang chạy PID
+    pixels.setPixelColor(0, pixels.Color(0, 255, 0));
     break;
   case TEST_L:
   case TEST_R:
     isRunning = true;
-    pixels.setPixelColor(0, pixels.Color(255, 0, 255)); // TÍM: Test Motor
+    pixels.setPixelColor(0, pixels.Color(255, 0, 255));
     break;
   case IDLE:
   default:
     isRunning = false;
-    pixels.setPixelColor(0, pixels.Color(255, 0, 0)); // ĐỎ: Dừng
+    applyPendingRuntimeParamsAtSafePoint();
+    pixels.setPixelColor(0, pixels.Color(255, 0, 0));
     break;
   }
   pixels.show();
 }
 
-// ==============================================================================
-// TASK ĐIỀU KHIỂN CHÍNH (CORE 1 - 100Hz)
-// ==============================================================================
 void mainControlTask(void *pvParameters)
 {
+  (void)pvParameters;
+
   static int prev_ir_FL = 0;
   static int prev_ir_FR = 0;
-  const int kDeltaPwm = 2;
-  xLastWakeTime = xTaskGetTickCount();
+  TickType_t lastWakeTime = xTaskGetTickCount();
+
+  setupControlTaskWatchdog();
 
   for (;;)
   {
+    uint32_t loopStartMs = millis();
     int boostPwmL = 0;
     int boostPwmR = 0;
-    unsigned long now = millis();
-    float dt_imu = 0.01f; // Chạy chuẩn 10ms -> dt = 0.01s
+
+    applyPendingRuntimeParamsAtSafePoint();
 
     if (stateChangeRequested)
     {
@@ -220,215 +309,155 @@ void mainControlTask(void *pvParameters)
       stateChangeRequested = false;
     }
 
-    // 1. ĐỌC CẢM BIẾN IR
-    readIR_TDM();
+    RuntimeParams cfg = captureActiveRuntimeParams();
 
-    if (isRunning)
+    IrSnapshot rawIr;
+    readIR_TDM(&rawIr);
+    IrSnapshot ir = getIrSnapshot();
+
+    bool frontWallStop = (isRunning && isFrontWallDetected(rawIr, cfg));
+    if (frontWallStop)
     {
-      int deltaFL = ir_FL - prev_ir_FL; // Cam bien so 1 (FL)
-      int deltaFR = ir_FR - prev_ir_FR; // Cam bien so 2 (FR)
-      boostPwmL = (deltaFL > 0) ? (kDeltaPwm * deltaFL) : 0;
-      boostPwmR = (deltaFR > 0) ? (kDeltaPwm * deltaFR) : 0;
+      int brakeRamp = max(1, cfg.ramp_rate * FRONT_STOP_BRAKE_RAMP_MULTIPLIER);
+      int newPwm_L = applyRateLimit(0, pwmL, brakeRamp);
+      int newPwm_R = applyRateLimit(0, pwmR, brakeRamp);
+      setLeftMotor(newPwm_L);
+      setRightMotor(newPwm_R);
+
+      if (abs(newPwm_L) <= 3 && abs(newPwm_R) <= 3)
+      {
+        changeState(IDLE);
+      }
     }
-    prev_ir_FL = ir_FL;
-    prev_ir_FR = ir_FR;
 
-    // 2. CẬP NHẬT IMU (MAHONY)
-    updateIMU(dt_imu);
-
-    // 3. ĐIỀU KHIỂN THEO TRẠNG THÁI
-    if (isRunning)
+    if (!frontWallStop)
     {
-      switch (carState)
+      if (isRunning)
       {
-      case WAIT_1S:
-        // Trạng thái đệm
-        if (now - stateStartTime >= 1000)
-        {
-          changeState(PID_RUN);
-        }
-        break;
+        int deltaFL = ir.frontLeft - prev_ir_FL;
+        int deltaFR = ir.frontRight - prev_ir_FR;
+        boostPwmL = (deltaFL > 0) ? (SENSOR_DELTA_PWM_GAIN * deltaFL) : 0;
+        boostPwmR = (deltaFR > 0) ? (SENSOR_DELTA_PWM_GAIN * deltaFR) : 0;
+      }
+      prev_ir_FL = ir.frontLeft;
+      prev_ir_FR = ir.frontRight;
 
-      case TEST_L:
-        setLeftMotor(constrain(base_pwm + boostPwmL, 0, Turn_Max));
-        setRightMotor(constrain(boostPwmR, 0, Turn_Max));
-        break;
+      updateIMU(CONTROL_DT_SECONDS);
 
-      case TEST_R:
-        setRightMotor(constrain(base_pwm + boostPwmR, 0, Turn_Max));
-        setLeftMotor(constrain(boostPwmL, 0, Turn_Max));
-        break;
-
-      case PID_RUN:
+      if (isRunning)
       {
-        if (isFrontWallDetected())
+        switch (carState)
         {
-          changeState(IDLE);
+        case TEST_L:
+          setLeftMotor(constrain(cfg.base_pwm + boostPwmL, 0, cfg.Turn_Max));
+          setRightMotor(constrain(boostPwmR, 0, cfg.Turn_Max));
           break;
-        }
 
-        long currentPulseL = pulseL;
-        long currentPulseR = pulseR;
-        long travelL = absPulse(currentPulseL);
-        long travelR = absPulse(currentPulseR);
-        long targetPulseL = pulses_per_cell;
-        long targetPulseR = max(1L, (pulses_per_cell * 18L) / 20L);
-        int steerIR = correctFromSideWalls();
+        case TEST_R:
+          setRightMotor(constrain(cfg.base_pwm + boostPwmR, 0, cfg.Turn_Max));
+          setLeftMotor(constrain(boostPwmL, 0, cfg.Turn_Max));
+          break;
 
-        if (steerIR != 0)
+        case PID_RUN:
         {
-          lastSpeedPulseL = currentPulseL;
-          lastSpeedPulseR = currentPulseR;
-          integralL = integralR = prevErrL = prevErrR = dFilterL = dFilterR = 0;
+          PulseSnapshot pulses = getPulseSnapshot();
+          long currentPulseL = pulses.left;
+          long currentPulseR = pulses.right;
+          long travelL = absPulse(currentPulseL);
+          long travelR = absPulse(currentPulseR);
+          int steerIR = correctFromSideWalls(ir, cfg);
 
-          int steerPower = constrain(abs(steerIR), sideCorrectionKick(), Turn_Max);
-          int outsidePwm = Turn_Max;
-          int insidePwm = constrain(base_pwm - steerPower, 0, Turn_Max);
-          int targetPwm_L = (steerIR > 0) ? outsidePwm : insidePwm;
-          int targetPwm_R = (steerIR > 0) ? insidePwm : outsidePwm;
+          if (steerIR != 0)
+          {
+            resetWheelPidMemory();
 
-          setLeftMotor(targetPwm_L);
-          setRightMotor(targetPwm_R);
-          break;
-        }
+            int steerPower = constrain(abs(steerIR), sideCorrectionKick(cfg),
+                                       cfg.Turn_Max);
+            int outsidePwm = cfg.Turn_Max;
+            int insidePwm = constrain(cfg.base_pwm - steerPower, 0, cfg.Turn_Max);
+            int targetPwm_L = (steerIR > 0) ? outsidePwm : insidePwm;
+            int targetPwm_R = (steerIR > 0) ? insidePwm : outsidePwm;
 
-        bool leftDone = travelL >= targetPulseL;
-        bool rightDone = travelR >= targetPulseR;
-
-        if (leftDone && rightDone)
-        {
-          changeState(IDLE);
-          break;
-        }
-
-        float speedL = (float)absPulse(currentPulseL - lastSpeedPulseL);
-        float speedR = (float)absPulse(currentPulseR - lastSpeedPulseR);
-        lastSpeedPulseL = currentPulseL;
-        lastSpeedPulseR = currentPulseR;
-
-        virtualVel = constrain(virtualVel + accel_rate, min_vel, max_vel);
-        virtualPos = (travelL + travelR) * 0.5f;
-
-        int pidTrimL = computeWheelSpeedPid(virtualVel, speedL, Kp_L, Ki_L,
-                                            Kd_L, integralL, prevErrL,
-                                            dFilterL);
-        int pidTrimR = computeWheelSpeedPid(virtualVel, speedR, Kp_R, Ki_R,
-                                            Kd_R, integralR, prevErrR,
-                                            dFilterR);
-        int basePwmL = keepMotorRunningPwm(base_pwm + pidTrimL);
-        int basePwmR = keepMotorRunningPwm(base_pwm + pidTrimR);
-        // A. Tính toán bù lái từ Gyro (MPU6050)
-        float yawError = continuousYaw - target_yaw;
-        int steerGyro = (int)(yawError * k_gyro);
-
-        // B. L/R chi sua lech tuong ben. FL/FR chi dung de dung khi gap tuong truoc.
-#if 0
-          static bool hasLeftWall = false;
-          static bool hasRightWall = false;
-
-          // Hysteresis: Quá ngưỡng tường (max_IR) thì tính là có tường. Dưới ngưỡng trống (min_IR) thì báo mất tường.
-          if (ir_FL > max_IR[1]) hasLeftWall = true;
-          else if (ir_FL < min_IR[1]) hasLeftWall = false;
-
-          if (ir_FR > max_IR[2]) hasRightWall = true;
-          else if (ir_FR < min_IR[2]) hasRightWall = false;
-          
-          int oldSteerIR = 0;
-
-          // Chỉ bám tường khi góc MPU không vẹo quá 3 độ
-          if (abs(yawError) <= 3.0f) {
-            if (hasLeftWall && hasRightWall) {
-              int diff = ir_FL - ir_FR;
-              if (abs(diff) > ir_deadband) {
-                steerIR = (diff > 0) ? (5 + (diff - ir_deadband) / 30)
-                                     : -(5 + (-diff - ir_deadband) / 30);
-              }
-            } else if (hasLeftWall && !hasRightWall) {
-              int diffL = ir_FL - max_IR[1];
-              if (abs(diffL) > ir_deadband) {
-                steerIR = (diffL > 0) ? (5 + (diffL - ir_deadband) / 30)
-                                      : -(5 + (-diffL - ir_deadband) / 30);
-              }
-            } else if (!hasLeftWall && hasRightWall) {
-              int diffR = ir_FR - max_IR[2];
-              if (abs(diffR) > ir_deadband) {
-                steerIR = (diffR > 0) ? -(5 + (diffR - ir_deadband) / 30)
-                                      : (5 + (-diffR - ir_deadband) / 30);
-              }
-            }
+            setLeftMotor(targetPwm_L);
+            setRightMotor(targetPwm_R);
+            break;
           }
 
-          // C. Tổng hợp và Ramping PWM
-#endif
-        int totalSteer = steerGyro;
-        if (steerIR != 0)
-        {
-          int gyroLimit = max(1, abs(steerIR) / 2);
-          totalSteer = steerIR + constrain(steerGyro, -gyroLimit, gyroLimit);
+          float speedL = (float)absPulse(currentPulseL - lastSpeedPulseL);
+          float speedR = (float)absPulse(currentPulseR - lastSpeedPulseR);
+          lastSpeedPulseL = currentPulseL;
+          lastSpeedPulseR = currentPulseR;
+
+          virtualVel = constrain(virtualVel + cfg.accel_rate, cfg.min_vel,
+                                 cfg.max_vel);
+          virtualPos = (travelL + travelR) * 0.5f;
+
+          int pidTrimL = computeWheelSpeedPid(virtualVel, speedL, cfg.Kp_L,
+                                              cfg.Ki_L, cfg.Kd_L, integralL,
+                                              prevErrL, dFilterL);
+          int pidTrimR = computeWheelSpeedPid(virtualVel, speedR, cfg.Kp_R,
+                                              cfg.Ki_R, cfg.Kd_R, integralR,
+                                              prevErrR, dFilterR);
+          int basePwmL = keepMotorRunningPwm(cfg.base_pwm + pidTrimL, cfg);
+          int basePwmR = keepMotorRunningPwm(cfg.base_pwm + pidTrimR, cfg);
+          float yawError = continuousYaw - target_yaw;
+          int totalSteer = (int)(yawError * cfg.k_gyro);
+
+          int targetPwm_L = keepMotorRunningPwm(basePwmL + totalSteer, cfg);
+          int targetPwm_R = keepMotorRunningPwm(basePwmR - totalSteer, cfg);
+
+          targetPwm_L = constrain(targetPwm_L + boostPwmL, 0, cfg.Turn_Max);
+          targetPwm_R = constrain(targetPwm_R + boostPwmR, 0, cfg.Turn_Max);
+
+          int newPwm_L = applyRateLimit(targetPwm_L, pwmL, cfg.ramp_rate);
+          int newPwm_R = applyRateLimit(targetPwm_R, pwmR, cfg.ramp_rate);
+
+          setLeftMotor(newPwm_L);
+          setRightMotor(newPwm_R);
+          break;
         }
 
-        int targetPwm_L = keepMotorRunningPwm(basePwmL + totalSteer);
-        int targetPwm_R = keepMotorRunningPwm(basePwmR - totalSteer);
-
-        targetPwm_L = constrain(targetPwm_L + boostPwmL, 0, Turn_Max);
-        targetPwm_R = constrain(targetPwm_R + boostPwmR, 0, Turn_Max);
-
-        int newPwm_L = leftDone ? 0 : applyRateLimit(targetPwm_L, pwmL);
-        int newPwm_R = rightDone ? 0 : applyRateLimit(targetPwm_R, pwmR);
-
-        setLeftMotor(newPwm_L);
-        setRightMotor(newPwm_R);
-        break;
-      }
-
-      default:
-        changeState(IDLE);
-        break;
+        default:
+          changeState(IDLE);
+          break;
+        }
       }
     }
 
-    // Delay cứng đúng 10ms (tính từ thời điểm xLastWakeTime)
-    vTaskDelayUntil(&xLastWakeTime, xFrequency);
+    finishControlLoop(loopStartMs);
+    vTaskDelayUntil(&lastWakeTime, pdMS_TO_TICKS(CONTROL_PERIOD_MS));
   }
 }
 
-// ==============================================================================
-// SETUP (Hàm loop mặc định sẽ bị bỏ trống)
-// ==============================================================================
+} // namespace
+
 void setup()
 {
   Serial.begin(115200);
 
-  // 1. Khởi tạo LED RGB
   pixels.begin();
   pixels.setBrightness(10);
-  pixels.setPixelColor(0, pixels.Color(255, 255, 0)); // VÀNG: Đang khởi tạo
+  pixels.setPixelColor(0, pixels.Color(255, 255, 0));
   pixels.show();
 
-  // 2. Khởi tạo các module con
   initSensors();
   initMotors();
   initIMU();
-
-  // 3. Khởi tạo Web Server (Chạy ở Core 0)
   setupWebServer();
 
-  // 4. Khởi tạo Task Điều khiển chính (Chạy ở Core 1, Ưu tiên Cao nhất)
   xTaskCreatePinnedToCore(
-      mainControlTask,          // Hàm task
-      "MainControlTask",        // Tên task
-      8192,                     // Kích thước stack
-      NULL,                     // Tham số truyền vào
-      configMAX_PRIORITIES - 1, // Mức ưu tiên cao nhất
-      NULL,                     // Handle
-      1                         // Chạy trên Core 1
-  );
+      mainControlTask,
+      "MainControlTask",
+      MAIN_CONTROL_STACK_SIZE,
+      nullptr,
+      configMAX_PRIORITIES - 1,
+      nullptr,
+      1);
 
-  changeState(IDLE); // Chuyển màu Đỏ (hoàn tất)
+  changeState(IDLE);
 }
 
 void loop()
 {
-  // FreeRTOS đã lo toàn bộ, loop() không làm gì cả.
-  vTaskDelete(NULL);
+  vTaskDelete(nullptr);
 }

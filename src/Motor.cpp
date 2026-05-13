@@ -76,9 +76,25 @@ void brakeMotors() {
   pwmR = 0;
 }
 
-int applyRateLimit(int pwmNew, int pwmPrev) {
+int applyRateLimit(int pwmNew, int pwmPrev, int rateLimit) {
+  int limit = max(1, abs(rateLimit));
   int delta = pwmNew - pwmPrev;
-  if (delta > ramp_rate) return pwmPrev + ramp_rate;
-  if (delta < -ramp_rate) return pwmPrev - ramp_rate;
+  if (delta > limit) return pwmPrev + limit;
+  if (delta < -limit) return pwmPrev - limit;
   return pwmNew;
+}
+
+int applyRateLimit(int pwmNew, int pwmPrev) {
+  return applyRateLimit(pwmNew, pwmPrev, ramp_rate);
+}
+
+PulseSnapshot getPulseSnapshot() {
+  PulseSnapshot snapshot;
+
+  portENTER_CRITICAL(&motorMux);
+  snapshot.left = pulseL;
+  snapshot.right = pulseR;
+  portEXIT_CRITICAL(&motorMux);
+
+  return snapshot;
 }

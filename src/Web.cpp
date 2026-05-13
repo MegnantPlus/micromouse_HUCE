@@ -54,12 +54,13 @@ void loadRuntimeParams() {
   pulses_per_cell = settings.getInt("xungO", pulses_per_cell);
   side_ref_L = settings.getInt("side7L", side_ref_L);
   side_ref_R = settings.getInt("side7R", side_ref_R);
-  for (int i = 0; i < 4; i++) {
+  for (int s = 1; s <= 4; s++) {
     char key[8];
-    snprintf(key, sizeof(key), "max%d", i);
-    max_IR[i] = settings.getInt(key, max_IR[i]);
-    snprintf(key, sizeof(key), "min%d", i);
-    min_IR[i] = settings.getInt(key, min_IR[i]);
+    // store/load using 1-based sensor numbering (max1..max4) but map to internal 0-based arrays
+    snprintf(key, sizeof(key), "max%d", s);
+    max_IR[SIDX(s)] = settings.getInt(key, max_IR[SIDX(s)]);
+    snprintf(key, sizeof(key), "min%d", s);
+    min_IR[SIDX(s)] = settings.getInt(key, min_IR[SIDX(s)]);
   }
   settings.end();
   clampRuntimeParams();
@@ -89,12 +90,13 @@ void saveRuntimeParams() {
   settings.putInt("xungO", pulses_per_cell);
   settings.putInt("side7L", side_ref_L);
   settings.putInt("side7R", side_ref_R);
-  for (int i = 0; i < 4; i++) {
+  for (int s = 1; s <= 4; s++) {
     char key[8];
-    snprintf(key, sizeof(key), "max%d", i);
-    settings.putInt(key, max_IR[i]);
-    snprintf(key, sizeof(key), "min%d", i);
-    settings.putInt(key, min_IR[i]);
+    // use 1-based sensor numbering for persistent keys
+    snprintf(key, sizeof(key), "max%d", s);
+    settings.putInt(key, max_IR[SIDX(s)]);
+    snprintf(key, sizeof(key), "min%d", s);
+    settings.putInt(key, min_IR[SIDX(s)]);
   }
   settings.end();
 }
@@ -370,19 +372,19 @@ void handleSet() {
 }
 
 void handleCalibHigh() {
-  max_IR[0] = constrain(ir_L - offset_upper, 0, 4095);
-  max_IR[1] = constrain(ir_FL - offset_upper, 0, 4095);
-  max_IR[2] = constrain(ir_FR - offset_upper, 0, 4095);
-  max_IR[3] = constrain(ir_R - offset_upper, 0, 4095);
+  max_IR[SIDX(S_L)] = constrain(ir_L - offset_upper, 0, 4095);
+  max_IR[SIDX(S_FL)] = constrain(ir_FL - offset_upper, 0, 4095);
+  max_IR[SIDX(S_FR)] = constrain(ir_FR - offset_upper, 0, 4095);
+  max_IR[SIDX(S_R)] = constrain(ir_R - offset_upper, 0, 4095);
   saveRuntimeParams();
   server.send(200, "text/plain", "Đã chốt Ngưỡng Tường (Max)!");
 }
 
 void handleCalibLow() {
-  min_IR[0] = constrain(ir_L + offset_lower, 0, 4095);
-  min_IR[1] = constrain(ir_FL + offset_lower, 0, 4095);
-  min_IR[2] = constrain(ir_FR + offset_lower, 0, 4095);
-  min_IR[3] = constrain(ir_R + offset_lower, 0, 4095);
+  min_IR[SIDX(S_L)] = constrain(ir_L + offset_lower, 0, 4095);
+  min_IR[SIDX(S_FL)] = constrain(ir_FL + offset_lower, 0, 4095);
+  min_IR[SIDX(S_FR)] = constrain(ir_FR + offset_lower, 0, 4095);
+  min_IR[SIDX(S_R)] = constrain(ir_R + offset_lower, 0, 4095);
   saveRuntimeParams();
   server.send(200, "text/plain", "Đã chốt Ngưỡng Trống (Min)!");
 }
@@ -441,9 +443,9 @@ void handleData() {
            "\"accel\":%.2f,\"vmax\":%.1f,\"vmin\":%.1f,"
            "\"ramp\":%d,\"gyro\":%.1f,\"irGain\":%.2f,\"pwmMin\":%d,\"pwmMax\":%d,"
            "\"xungO\":%d}",
-           ir_L, ir_FL, ir_FR, ir_R, ir_L - min_IR[0], ir_FL - min_IR[1],
-           ir_FR - min_IR[2], ir_R - min_IR[3], pulseL, pulseR, pwmL, pwmR,
-           (int)carState, max_IR[1], max_IR[2], side_ref_L, side_ref_R,
+           ir_L, ir_FL, ir_FR, ir_R, ir_L - min_IR[SIDX(S_L)], ir_FL - min_IR[SIDX(S_FL)],
+           ir_FR - min_IR[SIDX(S_FR)], ir_R - min_IR[SIDX(S_R)], pulseL, pulseR, pwmL, pwmR,
+           (int)carState, max_IR[SIDX(S_FL)], max_IR[SIDX(S_FR)], side_ref_L, side_ref_R,
            offset_upper, offset_lower,
            ir_deadband, base_pwm, Kp_L, Ki_L, Kd_L, Kp_R, Ki_R, Kd_R,
            accel_rate, max_vel, min_vel, ramp_rate, k_gyro, k_ir, Turn_Min,

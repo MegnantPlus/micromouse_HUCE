@@ -1,9 +1,72 @@
 #include "Globals.h"
 
+namespace {
+portMUX_TYPE runtimeParamsMux = portMUX_INITIALIZER_UNLOCKED;
+RuntimeParams pendingRuntimeParams;
+bool hasPendingRuntimeParams = false;
+
+void copyRuntimeParamsFromGlobals(RuntimeParams &params) {
+  params.Kp_L = Kp_L;
+  params.Ki_L = Ki_L;
+  params.Kd_L = Kd_L;
+  params.Kp_R = Kp_R;
+  params.Ki_R = Ki_R;
+  params.Kd_R = Kd_R;
+  params.Kp_T = Kp_T;
+  params.Ki_T = Ki_T;
+  params.Kd_T = Kd_T;
+  params.Turn_Max = Turn_Max;
+  params.Turn_Min = Turn_Min;
+  params.Turn_Err = Turn_Err;
+  params.accel_rate = accel_rate;
+  params.max_vel = max_vel;
+  params.min_vel = min_vel;
+  params.ramp_rate = ramp_rate;
+  params.k_gyro = k_gyro;
+  params.k_ir = k_ir;
+  params.pulses_per_cell = pulses_per_cell;
+  params.side_ref_L = side_ref_L;
+  params.side_ref_R = side_ref_R;
+  params.offset_upper = offset_upper;
+  params.offset_lower = offset_lower;
+  params.ir_deadband = ir_deadband;
+  params.base_pwm = base_pwm;
+}
+
+void copyRuntimeParamsToGlobals(const RuntimeParams &params) {
+  Kp_L = params.Kp_L;
+  Ki_L = params.Ki_L;
+  Kd_L = params.Kd_L;
+  Kp_R = params.Kp_R;
+  Ki_R = params.Ki_R;
+  Kd_R = params.Kd_R;
+  Kp_T = params.Kp_T;
+  Ki_T = params.Ki_T;
+  Kd_T = params.Kd_T;
+  Turn_Max = params.Turn_Max;
+  Turn_Min = params.Turn_Min;
+  Turn_Err = params.Turn_Err;
+  accel_rate = params.accel_rate;
+  max_vel = params.max_vel;
+  min_vel = params.min_vel;
+  ramp_rate = params.ramp_rate;
+  k_gyro = params.k_gyro;
+  k_ir = params.k_ir;
+  pulses_per_cell = params.pulses_per_cell;
+  side_ref_L = params.side_ref_L;
+  side_ref_R = params.side_ref_R;
+  offset_upper = params.offset_upper;
+  offset_lower = params.offset_lower;
+  ir_deadband = params.ir_deadband;
+  base_pwm = params.base_pwm;
+}
+}
+
 // ---------------------------------------------------------
 // BIẾN IR & HIỆU CHUẨN (Dùng volatile vì được ghi trong task và đọc từ web)
 // ---------------------------------------------------------
 volatile int ir_L = 0, ir_FL = 0, ir_FR = 0, ir_R = 0;
+volatile int raw_ir_L = 0, raw_ir_FL = 0, raw_ir_FR = 0, raw_ir_R = 0;
 int base_L = 0, base_FL = 0, base_FR = 0, base_R = 0; // Giá trị tường chuẩn
 
 // --- BIẾN NGƯỠNG & ĐIỀU KHIỂN BĂM XUNG ---
@@ -55,6 +118,45 @@ volatile bool stateChangeRequested = false;
 
 volatile bool isRunning = false;
 volatile bool isTurningTask = false;
+volatile uint32_t controlTaskLastLoopMs = 0;
+volatile uint32_t controlTaskOverrunCount = 0;
+
+RuntimeParams captureActiveRuntimeParams() {
+  RuntimeParams params;
+
+  portENTER_CRITICAL(&runtimeParamsMux);
+  copyRuntimeParamsFromGlobals(params);
+  portEXIT_CRITICAL(&runtimeParamsMux);
+
+  return params;
+}
+
+void applyActiveRuntimeParams(const RuntimeParams &params) {
+  portENTER_CRITICAL(&runtimeParamsMux);
+  copyRuntimeParamsToGlobals(params);
+  portEXIT_CRITICAL(&runtimeParamsMux);
+}
+
+void queuePendingRuntimeParams(const RuntimeParams &params) {
+  portENTER_CRITICAL(&runtimeParamsMux);
+  pendingRuntimeParams = params;
+  hasPendingRuntimeParams = true;
+  portEXIT_CRITICAL(&runtimeParamsMux);
+}
+
+bool consumePendingRuntimeParams(RuntimeParams &params) {
+  bool hasParams;
+
+  portENTER_CRITICAL(&runtimeParamsMux);
+  hasParams = hasPendingRuntimeParams;
+  if (hasParams) {
+    params = pendingRuntimeParams;
+    hasPendingRuntimeParams = false;
+  }
+  portEXIT_CRITICAL(&runtimeParamsMux);
+
+  return hasParams;
+}
 
 // ---------------------------------------------------------
 // ĐỐI TƯỢNG PHẦN CỨNG (LED, MPU)

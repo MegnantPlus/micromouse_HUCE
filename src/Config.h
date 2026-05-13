@@ -1,12 +1,8 @@
 #pragma once
 
-// --- CẤU HÌNH LED RGB ---
 #define LED_PIN 48
 #define NUMPIXELS 1
 
-// ---------------------------------------------------------
-// PINOUT MỚI (ADC1 CHUYÊN DỤNG CHO MẮT THU)
-// ---------------------------------------------------------
 #define PIN_SDA 8
 #define PIN_SCL 9
 
@@ -20,17 +16,20 @@
 #define MOT_R_PWM 12
 #define MOT_R_DIR 13
 
-// MẮT THU (RX) - Bắt buộc dùng ADC1
-#define IR_RX_L 1  // Trái
-#define IR_RX_FL 2 // Trước Trái
-#define IR_RX_FR 3 // Trước Phải
-#define IR_RX_R 4  // Phải
+#define IR_RX_L 1
+#define IR_RX_FL 2
+#define IR_RX_FR 3
+#define IR_RX_R 4
 
-// MẮT PHÁT (TX) - Kích Mosfet kênh N
 #define IR_TX_L 14
 #define IR_TX_FL 15
 #define IR_TX_FR 16
 #define IR_TX_R 17
 
-// Enum trạng thái xe
-enum RunState { IDLE, WAIT_1S, BLIND_START, PID_RUN, TEST_L, TEST_R };
+constexpr int FRONT_STOP_EARLY_MARGIN = 800;
+constexpr unsigned long FRONT_STOP_DECEL_MS = 60;
+constexpr int FRONT_STOP_BRAKE_RAMP_MULTIPLIER = 3;
+
+constexpr bool AUTO_START = true;
+
+enum RunState { IDLE, WAIT_1S, BLIND_START, PID_RUN, DECEL_STOP, TEST_L, TEST_R };

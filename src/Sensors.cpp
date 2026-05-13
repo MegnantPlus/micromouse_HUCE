@@ -2,7 +2,19 @@
 #include "Config.h"
 #include "Globals.h"
 
-// --- THUẬT TOÁN LỌC TRUNG VỊ (MEDIAN FILTER) ---
+namespace {
+portMUX_TYPE irMux = portMUX_INITIALIZER_UNLOCKED;
+
+void publishIrSnapshot(const IrSnapshot &snapshot) {
+  portENTER_CRITICAL(&irMux);
+  ir_L = snapshot.left;
+  ir_FL = snapshot.frontLeft;
+  ir_FR = snapshot.frontRight;
+  ir_R = snapshot.right;
+  portEXIT_CRITICAL(&irMux);
+}
+}
+
 int getMedian(int arr[], int n) {
   for (int i = 0; i < n - 1; i++) {
     for (int j = i + 1; j < n; j++) {
@@ -16,13 +28,10 @@ int getMedian(int arr[], int n) {
   return arr[n / 2];
 }
 
-// --- HÀM ĐỌC 1 MẮT ---
 int readSingleEye(int tx_pin, int rx_pin) {
-  int samples[3]; // Lấy 3 mẫu để chạy nhanh hơn trong task 10ms
+  int samples[3];
 
-  digitalWrite(tx_pin, HIGH); // Bật LED phát
-
-  // Nạp tụ điện ký sinh
+  digitalWrite(tx_pin, HIGH);
   delayMicroseconds(350);
 
   for (int i = 0; i < 3; i++) {
@@ -30,8 +39,7 @@ int readSingleEye(int tx_pin, int rx_pin) {
     if (i < 2) delayMicroseconds(200);
   }
 
-  digitalWrite(tx_pin, LOW); // Tắt LED phát
-
+  digitalWrite(tx_pin, LOW);
   return getMedian(samples, 3);
 }
 
@@ -43,25 +51,43 @@ void initSensors() {
   analogReadResolution(12);
 }
 
-// ---------------------------------------------------------
-// THUẬT TOÁN ĐỌC LED 4 MẮT SIÊU NHANH (~3ms tổng)
-// ---------------------------------------------------------
-void readIR_TDM() {
-  const float alpha = 0.3f; // Hệ số EMA lọc nhiễu lai
+IrSnapshot getIrSnapshot() {
+  IrSnapshot snapshot;
 
-  // Quét luân phiên cực nhanh, không làm nghẽn vòng lặp FreeRTOS
-  int raw_L = readSingleEye(IR_TX_L, IR_RX_L);
-  ir_L = (int)(alpha * raw_L + (1.0f - alpha) * ir_L);
-  delayMicroseconds(100); // Ngắt nhiễu quang học nhỏ
-  
-  int raw_FL = readSingleEye(IR_TX_FL, IR_RX_FL);
-  ir_FL = (int)(alpha * raw_FL + (1.0f - alpha) * ir_FL);
+  portENTER_CRITICAL(&irMux);
+  snapshot.left = ir_L;
+  snapshot.frontLeft = ir_FL;
+  snapshot.frontRight = ir_FR;
+  snapshot.right = ir_R;
+  portEXIT_CRITICAL(&irMux);
+
+  return snapshot;
+}
+
+void readIR_TDM(IrSnapshot *rawOut) {
+  const float alpha = 0.3f;
+  IrSnapshot previous = getIrSnapshot();
+  IrSnapshot next;
+  IrSnapshot raw;
+
+  raw.left = readSingleEye(IR_TX_L, IR_RX_L);
+  next.left = (int)(alpha * raw.left + (1.0f - alpha) * previous.left);
   delayMicroseconds(100);
-  
-  int raw_FR = readSingleEye(IR_TX_FR, IR_RX_FR);
-  ir_FR = (int)(alpha * raw_FR + (1.0f - alpha) * ir_FR);
+
+  raw.frontLeft = readSingleEye(IR_TX_FL, IR_RX_FL);
+  next.frontLeft = (int)(alpha * raw.frontLeft + (1.0f - alpha) * previous.frontLeft);
   delayMicroseconds(100);
-  
-  int raw_R = readSingleEye(IR_TX_R, IR_RX_R);
-  ir_R = (int)(alpha * raw_R + (1.0f - alpha) * ir_R);
+
+  raw.frontRight = readSingleEye(IR_TX_FR, IR_RX_FR);
+  next.frontRight = (int)(alpha * raw.frontRight + (1.0f - alpha) * previous.frontRight);
+  delayMicroseconds(100);
+
+  raw.right = readSingleEye(IR_TX_R, IR_RX_R);
+  next.right = (int)(alpha * raw.right + (1.0f - alpha) * previous.right);
+
+  if (rawOut != nullptr) {
+    *rawOut = raw;
+  }
+
+  publishIrSnapshot(next);
 }

@@ -3,7 +3,7 @@
 #include "Globals.h"
 #include <Wire.h>
 
-const int MPU_ADDR = 0x68;
+const uint8_t MPU_ADDR = 0x68;
 float GyroErrorX = 0, GyroErrorY = 0, GyroErrorZ = 0;
 float prevRawAngleZ = 0;
 int rotations = 0;
@@ -15,7 +15,7 @@ float integralFBx = 0.0f, integralFBy = 0.0f, integralFBz = 0.0f;
 
 void writeRegister(uint8_t reg, uint8_t data) {
   if (i2cMutex != NULL) xSemaphoreTake(i2cMutex, portMAX_DELAY);
-  Wire.beginTransmission(MPU_ADDR);
+  Wire.beginTransmission((uint8_t)MPU_ADDR);
   Wire.write(reg);
   Wire.write(data);
   Wire.endTransmission();
@@ -80,10 +80,10 @@ void calibrateMPU(int duration_ms) {
 
   while (millis() - start_time < duration_ms) {
     if (i2cMutex != NULL) xSemaphoreTake(i2cMutex, portMAX_DELAY);
-    Wire.beginTransmission(MPU_ADDR);
+    Wire.beginTransmission((uint8_t)MPU_ADDR);
     Wire.write(0x43);
     Wire.endTransmission(false);
-    Wire.requestFrom(MPU_ADDR, 6, true);
+    Wire.requestFrom((uint16_t)MPU_ADDR, (size_t)6, true);
     sum_gx += (float)(Wire.read() << 8 | Wire.read()) / 65.5f;
     sum_gy += (float)(Wire.read() << 8 | Wire.read()) / 65.5f;
     sum_gz += (float)(Wire.read() << 8 | Wire.read()) / 65.5f;
@@ -116,10 +116,10 @@ void initIMU() {
 
 void updateIMU(float dt) {
   if (i2cMutex != NULL) xSemaphoreTake(i2cMutex, portMAX_DELAY);
-  Wire.beginTransmission(MPU_ADDR);
+  Wire.beginTransmission((uint8_t)MPU_ADDR);
   Wire.write(0x3B);
   Wire.endTransmission(false);
-  Wire.requestFrom(MPU_ADDR, 14, true);
+  Wire.requestFrom((uint16_t)MPU_ADDR, (size_t)14, true);
   
   float accX = (float)(Wire.read() << 8 | Wire.read()) / 8192.0f;
   float accY = (float)(Wire.read() << 8 | Wire.read()) / 8192.0f;

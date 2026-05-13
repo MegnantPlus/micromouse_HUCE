@@ -8,7 +8,50 @@
 // BIẾN IR & HIỆU CHUẨN
 // ---------------------------------------------------------
 extern volatile int ir_L, ir_FL, ir_FR, ir_R;
+extern volatile int raw_ir_L, raw_ir_FL, raw_ir_FR, raw_ir_R;
 extern int base_L, base_FL, base_FR, base_R;
+
+struct IrSnapshot {
+	int left;
+	int frontLeft;
+	int frontRight;
+	int right;
+};
+
+struct RuntimeParams {
+	float Kp_L;
+	float Ki_L;
+	float Kd_L;
+	float Kp_R;
+	float Ki_R;
+	float Kd_R;
+	float Kp_T;
+	float Ki_T;
+	float Kd_T;
+	int Turn_Max;
+	int Turn_Min;
+	float Turn_Err;
+	float accel_rate;
+	float max_vel;
+	float min_vel;
+	int ramp_rate;
+	float k_gyro;
+	float k_ir;
+	int pulses_per_cell;
+	int side_ref_L;
+	int side_ref_R;
+	int offset_upper;
+	int offset_lower;
+	int ir_deadband;
+	int base_pwm;
+};
+
+// Sensor numbering: use 1..4 in code (user-facing). Map to internal 0-based arrays with SIDX(x).
+#define S_L 1
+#define S_FL 2
+#define S_FR 3
+#define S_R 4
+#define SIDX(s) ((s) - 1)
 
 // ---------------------------------------------------------
 // BIẾN TOÀN CỤC WEB / PID
@@ -58,6 +101,13 @@ extern volatile bool stateChangeRequested;
 
 extern volatile bool isRunning;
 extern volatile bool isTurningTask;
+extern volatile uint32_t controlTaskLastLoopMs;
+extern volatile uint32_t controlTaskOverrunCount;
+
+RuntimeParams captureActiveRuntimeParams();
+void applyActiveRuntimeParams(const RuntimeParams &params);
+void queuePendingRuntimeParams(const RuntimeParams &params);
+bool consumePendingRuntimeParams(RuntimeParams &params);
 
 // ---------------------------------------------------------
 // ĐỐI TƯỢNG PHẦN CỨNG (LED, MPU)
