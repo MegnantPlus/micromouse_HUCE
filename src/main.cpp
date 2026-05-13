@@ -9,6 +9,7 @@
 #include "IMU.h"
 #include "Sensors.h"
 #include "Motor.h"
+#include "WallAvoidance.h"
 #include "Web.h"
 
 namespace
@@ -365,13 +366,18 @@ void mainControlTask(void *pvParameters)
           long currentPulseR = pulses.right;
           long travelL = absPulse(currentPulseL);
           long travelR = absPulse(currentPulseR);
-          int steerIR = correctFromSideWalls(ir, cfg);
+          WallAvoidanceResult wallAvoidance =
+              computeStraightWallAvoidance(ir, cfg);
+          int steerIR = wallAvoidance.active ? wallAvoidance.steer
+                                             : correctFromSideWalls(ir, cfg);
 
           if (steerIR != 0)
           {
             resetWheelPidMemory();
 
-            int steerPower = constrain(abs(steerIR), sideCorrectionKick(cfg),
+            int minSteerPower = wallAvoidance.active ? wallAvoidanceKick(cfg)
+                                                     : sideCorrectionKick(cfg);
+            int steerPower = constrain(abs(steerIR), minSteerPower,
                                        cfg.Turn_Max);
             int outsidePwm = cfg.Turn_Max;
             int insidePwm = constrain(cfg.base_pwm - steerPower, 0, cfg.Turn_Max);
