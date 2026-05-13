@@ -204,7 +204,8 @@ const char index_html[] PROGMEM = R"rawliteral(
     </div>
 
     <div class="grid-btn">
-      <button class="btn btn-run" onclick="fetch('/cmd?val=START')">DI THANG 1 O</button>
+      <button class="btn btn-run" onclick="fetch('/cmd?val=START')">CHAY LIEN TUC</button>
+      <button class="btn btn-run" style="background:#27ae60;" onclick="fetch('/cmd?val=ONE_CELL')">DI THANG 1 O</button>
       <button class="btn btn-stop" onclick="fetch('/cmd?val=STOP')">🛑 PHANH</button>
     </div>
   </div>
@@ -413,6 +414,9 @@ void handleCmd() {
     String command = server.arg("val");
     if (command == "START") {
       requestedState = PID_RUN;
+      stateChangeRequested = true;
+    } else if (command == "ONE_CELL") {
+      requestedState = PID_RUN_ONE_CELL;
       stateChangeRequested = true;
     } else if (command == "STOP") {
       requestedState = IDLE;

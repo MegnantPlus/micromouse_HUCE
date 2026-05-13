@@ -24,7 +24,7 @@ const int FRONT_STOP_SENSOR_RIGHT = SENSOR_R;
 const int CONTROL_PERIOD_MS = 10;
 const float CONTROL_DT_SECONDS = CONTROL_PERIOD_MS / 1000.0f;
 const int SENSOR_DELTA_PWM_GAIN = 2;
-const int FRONT_STOP_EARLY_MARGIN = 1000;
+const int FRONT_STOP_EARLY_MARGIN = 800;
 const int FRONT_STOP_BRAKE_RAMP_MULTIPLIER = 3;
 const uint32_t MAIN_CONTROL_STACK_SIZE = 8192;
 const uint32_t CONTROL_TASK_WDT_TIMEOUT_SECONDS = 2;
@@ -264,6 +264,7 @@ void changeState(RunState newState)
   switch (newState)
   {
   case PID_RUN:
+  case PID_RUN_ONE_CELL:
     resetWheelPidMemory();
     virtualVel = 0.0f;
     virtualPos = 0.0f;
@@ -360,12 +361,21 @@ void mainControlTask(void *pvParameters)
           break;
 
         case PID_RUN:
+        case PID_RUN_ONE_CELL:
         {
           PulseSnapshot pulses = getPulseSnapshot();
           long currentPulseL = pulses.left;
           long currentPulseR = pulses.right;
           long travelL = absPulse(currentPulseL);
           long travelR = absPulse(currentPulseR);
+          long travelAvg = (travelL + travelR) / 2;
+          if (carState == PID_RUN_ONE_CELL &&
+              travelAvg >= cfg.pulses_per_cell)
+          {
+            changeState(IDLE);
+            break;
+          }
+
           WallAvoidanceResult wallAvoidance =
               computeStraightWallAvoidance(ir, cfg);
           int steerIR = wallAvoidance.active ? wallAvoidance.steer
@@ -396,7 +406,7 @@ void mainControlTask(void *pvParameters)
 
           virtualVel = constrain(virtualVel + cfg.accel_rate, cfg.min_vel,
                                  cfg.max_vel);
-          virtualPos = (travelL + travelR) * 0.5f;
+          virtualPos = travelAvg;
 
           int pidTrimL = computeWheelSpeedPid(virtualVel, speedL, cfg.Kp_L,
                                               cfg.Ki_L, cfg.Kd_L, integralL,
