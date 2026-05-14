@@ -39,6 +39,8 @@ struct RuntimeParams {
 	float k_ir;
 	int pulses_per_cell;
 	int side_ref_L;
+	int side_ref_FL;
+	int side_ref_FR;
 	int side_ref_R;
 	int offset_upper;
 	int offset_lower;
@@ -73,6 +75,8 @@ extern float k_gyro;
 extern float k_ir;
 extern int pulses_per_cell;
 extern int side_ref_L;
+extern int side_ref_FL;
+extern int side_ref_FR;
 extern int side_ref_R;
 
 // --- BIẾN NGƯỠNG & ĐIỀU KHIỂN BĂM XUNG ---
@@ -103,6 +107,10 @@ extern volatile bool isRunning;
 extern volatile bool isTurningTask;
 extern volatile uint32_t controlTaskLastLoopMs;
 extern volatile uint32_t controlTaskOverrunCount;
+extern volatile int debugSideErrorL;
+extern volatile int debugSideErrorR;
+extern volatile int debugSteerIR;
+extern volatile int debugTotalSteer;
 
 RuntimeParams captureActiveRuntimeParams();
 void applyActiveRuntimeParams(const RuntimeParams &params);

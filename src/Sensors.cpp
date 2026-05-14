@@ -31,21 +31,15 @@ int getMedian(int arr[], int n) {
 int readSingleEye(int tx_pin, int rx_pin) {
   int samples[3];
 
-  digitalWrite(tx_pin, LOW);
-  delayMicroseconds(80);
+  digitalWrite(tx_pin, HIGH);
+  delayMicroseconds(350);
 
   for (int i = 0; i < 3; i++) {
-    int ambient = analogRead(rx_pin);
-
-    digitalWrite(tx_pin, HIGH);
-    delayMicroseconds(220);
-    int reflected = analogRead(rx_pin);
-    digitalWrite(tx_pin, LOW);
-
-    samples[i] = max(0, reflected - ambient);
-    if (i < 2) delayMicroseconds(120);
+    samples[i] = analogRead(rx_pin);
+    if (i < 2) delayMicroseconds(200);
   }
 
+  digitalWrite(tx_pin, LOW);
   return getMedian(samples, 3);
 }
 
@@ -54,17 +48,7 @@ void initSensors() {
   pinMode(IR_TX_FL, OUTPUT);
   pinMode(IR_TX_FR, OUTPUT);
   pinMode(IR_TX_R, OUTPUT);
-
-  digitalWrite(IR_TX_L, LOW);
-  digitalWrite(IR_TX_FL, LOW);
-  digitalWrite(IR_TX_FR, LOW);
-  digitalWrite(IR_TX_R, LOW);
-
   analogReadResolution(12);
-  analogSetPinAttenuation(IR_RX_L, ADC_11db);
-  analogSetPinAttenuation(IR_RX_FL, ADC_11db);
-  analogSetPinAttenuation(IR_RX_FR, ADC_11db);
-  analogSetPinAttenuation(IR_RX_R, ADC_11db);
 }
 
 IrSnapshot getIrSnapshot() {
@@ -81,35 +65,25 @@ IrSnapshot getIrSnapshot() {
 }
 
 void readIR_TDM(IrSnapshot *rawOut) {
-  const float alpha = 0.2f;
-  const int maxStepPerCycle = 140;
-  const int noiseDeadband = 6;
+  const float alpha = 0.3f;
   IrSnapshot previous = getIrSnapshot();
   IrSnapshot next;
   IrSnapshot raw;
 
   raw.left = readSingleEye(IR_TX_L, IR_RX_L);
-  int limitedLeft = previous.left + constrain(raw.left - previous.left, -maxStepPerCycle, maxStepPerCycle);
-  next.left = (int)(alpha * limitedLeft + (1.0f - alpha) * previous.left);
-  if (abs(next.left - previous.left) <= noiseDeadband) next.left = previous.left;
+  next.left = (int)(alpha * raw.left + (1.0f - alpha) * previous.left);
   delayMicroseconds(100);
 
   raw.frontLeft = readSingleEye(IR_TX_FL, IR_RX_FL);
-  int limitedFrontLeft = previous.frontLeft + constrain(raw.frontLeft - previous.frontLeft, -maxStepPerCycle, maxStepPerCycle);
-  next.frontLeft = (int)(alpha * limitedFrontLeft + (1.0f - alpha) * previous.frontLeft);
-  if (abs(next.frontLeft - previous.frontLeft) <= noiseDeadband) next.frontLeft = previous.frontLeft;
+  next.frontLeft = (int)(alpha * raw.frontLeft + (1.0f - alpha) * previous.frontLeft);
   delayMicroseconds(100);
 
   raw.frontRight = readSingleEye(IR_TX_FR, IR_RX_FR);
-  int limitedFrontRight = previous.frontRight + constrain(raw.frontRight - previous.frontRight, -maxStepPerCycle, maxStepPerCycle);
-  next.frontRight = (int)(alpha * limitedFrontRight + (1.0f - alpha) * previous.frontRight);
-  if (abs(next.frontRight - previous.frontRight) <= noiseDeadband) next.frontRight = previous.frontRight;
+  next.frontRight = (int)(alpha * raw.frontRight + (1.0f - alpha) * previous.frontRight);
   delayMicroseconds(100);
 
   raw.right = readSingleEye(IR_TX_R, IR_RX_R);
-  int limitedRight = previous.right + constrain(raw.right - previous.right, -maxStepPerCycle, maxStepPerCycle);
-  next.right = (int)(alpha * limitedRight + (1.0f - alpha) * previous.right);
-  if (abs(next.right - previous.right) <= noiseDeadband) next.right = previous.right;
+  next.right = (int)(alpha * raw.right + (1.0f - alpha) * previous.right);
 
   if (rawOut != nullptr) {
     *rawOut = raw;

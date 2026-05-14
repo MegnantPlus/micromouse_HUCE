@@ -26,6 +26,8 @@ void copyRuntimeParamsFromGlobals(RuntimeParams &params) {
   params.k_ir = k_ir;
   params.pulses_per_cell = pulses_per_cell;
   params.side_ref_L = side_ref_L;
+  params.side_ref_FL = side_ref_FL;
+  params.side_ref_FR = side_ref_FR;
   params.side_ref_R = side_ref_R;
   params.offset_upper = offset_upper;
   params.offset_lower = offset_lower;
@@ -54,6 +56,8 @@ void copyRuntimeParamsToGlobals(const RuntimeParams &params) {
   k_ir = params.k_ir;
   pulses_per_cell = params.pulses_per_cell;
   side_ref_L = params.side_ref_L;
+  side_ref_FL = params.side_ref_FL;
+  side_ref_FR = params.side_ref_FR;
   side_ref_R = params.side_ref_R;
   offset_upper = params.offset_upper;
   offset_lower = params.offset_lower;
@@ -97,6 +101,8 @@ float k_gyro = 6.0;
 float k_ir = 0.1; // Hệ số bám tường IR
 int pulses_per_cell = 980;
 int side_ref_L = 4095;
+int side_ref_FL = 4095;
+int side_ref_FR = 4095;
 int side_ref_R = 4095;
 
 // ---------------------------------------------------------
@@ -120,6 +126,10 @@ volatile bool isRunning = false;
 volatile bool isTurningTask = false;
 volatile uint32_t controlTaskLastLoopMs = 0;
 volatile uint32_t controlTaskOverrunCount = 0;
+volatile int debugSideErrorL = 0;
+volatile int debugSideErrorR = 0;
+volatile int debugSteerIR = 0;
+volatile int debugTotalSteer = 0;
 
 RuntimeParams captureActiveRuntimeParams() {
   RuntimeParams params;
