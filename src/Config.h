@@ -32,4 +32,13 @@ constexpr int FRONT_STOP_BRAKE_RAMP_MULTIPLIER = 3;
 
 constexpr bool AUTO_START = true;
 
-enum RunState { IDLE, WAIT_1S, BLIND_START, PID_RUN, DECEL_STOP, TEST_L, TEST_R };
+enum RunState {
+  IDLE,
+  WAIT_1S,
+  BLIND_START,
+  PID_RUN,
+  DECEL_STOP,
+  TEST_L,
+  TEST_R,
+  PID_RUN_ONE_CELL
+};

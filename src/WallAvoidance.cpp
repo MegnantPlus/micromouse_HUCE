@@ -18,7 +18,7 @@ int closeWallThreshold(int sensorIndex, const RuntimeParams &cfg) {
 }
 
 int wallAvoidanceKick(const RuntimeParams &cfg) {
-  return constrain(cfg.Turn_Min, 25, 45);
+  return constrain(cfg.Turn_Min / 3, 6, 15);
 }
 
 WallAvoidanceResult computeStraightWallAvoidance(const IrSnapshot &ir,

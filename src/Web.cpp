@@ -1,5 +1,6 @@
 #include "Web.h"
 #include "Globals.h"
+#include "Sensors.h"
 #include <DNSServer.h>
 #include <Preferences.h>
 #include <WebServer.h>
@@ -13,6 +14,46 @@ WebServer server(80);
 Preferences settings;
 const char *ssid = "ROBOT_VANG_100";
 const char *password = "chaydiemmuoi";
+
+IrSnapshot latestRawIrSnapshot() {
+  IrSnapshot s;
+  s.left = raw_ir_L;
+  s.frontLeft = raw_ir_FL;
+  s.frontRight = raw_ir_FR;
+  s.right = raw_ir_R;
+
+  if ((s.left | s.frontLeft | s.frontRight | s.right) == 0) {
+    return getIrSnapshot();
+  }
+  return s;
+}
+
+IrSnapshot averageIrSnapshot(int sampleCount, int sampleDelayMs) {
+  long sumL = 0;
+  long sumFL = 0;
+  long sumFR = 0;
+  long sumR = 0;
+  int count = max(1, sampleCount);
+
+  for (int i = 0; i < count; i++) {
+    IrSnapshot s = latestRawIrSnapshot();
+    sumL += s.left;
+    sumFL += s.frontLeft;
+    sumFR += s.frontRight;
+    sumR += s.right;
+
+    if (i + 1 < count) {
+      delay(max(1, sampleDelayMs));
+    }
+  }
+
+  IrSnapshot avg;
+  avg.left = (int)(sumL / count);
+  avg.frontLeft = (int)(sumFL / count);
+  avg.frontRight = (int)(sumFR / count);
+  avg.right = (int)(sumR / count);
+  return avg;
+}
 
 void clampRuntimeParams() {
   Turn_Min = constrain(Turn_Min, 0, 255);
@@ -47,7 +88,6 @@ void loadRuntimeParams() {
   max_vel = settings.getFloat("vmax", max_vel);
   min_vel = settings.getFloat("vmin", min_vel);
   ramp_rate = settings.getInt("ramp", ramp_rate);
-  k_gyro = settings.getFloat("gyro", k_gyro);
   k_ir = settings.getFloat("irGain", k_ir);
   Turn_Min = settings.getInt("pwmMin", Turn_Min);
   Turn_Max = settings.getInt("pwmMax", Turn_Max);
@@ -83,7 +123,6 @@ void saveRuntimeParams() {
   settings.putFloat("vmax", max_vel);
   settings.putFloat("vmin", min_vel);
   settings.putInt("ramp", ramp_rate);
-  settings.putFloat("gyro", k_gyro);
   settings.putFloat("irGain", k_ir);
   settings.putInt("pwmMin", Turn_Min);
   settings.putInt("pwmMax", Turn_Max);
@@ -179,7 +218,6 @@ const char index_html[] PROGMEM = R"rawliteral(
       <div class="group">
         <h4>KHUNG GAM</h4>
         <label>Ramp <input type="number" id="ramp" step="1" value="10"></label>
-        <label>Gyro <input type="number" id="gyro" step="0.1" value="6.0"></label>
         <label>IR Gain <input type="number" id="ir_gain" step="0.01" value="0.1"></label>
         <label>PWM Min <input type="number" id="pwm_min" step="1" value="35"></label>
         <label>PWM Max <input type="number" id="pwm_max" step="1" value="100"></label>
@@ -204,7 +242,8 @@ const char index_html[] PROGMEM = R"rawliteral(
     </div>
 
     <div class="grid-btn">
-      <button class="btn btn-run" onclick="fetch('/cmd?val=START')">DI THANG 1 O</button>
+      <button class="btn btn-run" onclick="fetch('/cmd?val=START')">CHAY LIEN TUC</button>
+      <button class="btn btn-run" style="background:#27ae60;" onclick="fetch('/cmd?val=ONE_CELL')">DI THANG 1 O</button>
       <button class="btn btn-stop" onclick="fetch('/cmd?val=STOP')">🛑 PHANH</button>
     </div>
   </div>
@@ -224,7 +263,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     offUp: 'off_up', offLow: 'off_low', deadband: 'deadband', base: 'basepwm',
     kpL: 'kp_l', kiL: 'ki_l', kdL: 'kd_l', kpR: 'kp_r', kiR: 'ki_r',
     kdR: 'kd_r', accel: 'accel', vmax: 'vmax', vmin: 'vmin',
-    ramp: 'ramp', gyro: 'gyro', irGain: 'ir_gain', pwmMin: 'pwm_min', pwmMax: 'pwm_max',
+    ramp: 'ramp', irGain: 'ir_gain', pwmMin: 'pwm_min', pwmMax: 'pwm_max',
     xungO: 'xung_o'
   };
   function resizeCanvas() { canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight; }
@@ -287,7 +326,6 @@ const char index_html[] PROGMEM = R"rawliteral(
       "vmax=" + val('vmax'),
       "vmin=" + val('vmin'),
       "ramp=" + val('ramp'),
-      "gyro=" + val('gyro'),
       "irGain=" + val('ir_gain'),
       "pwmMin=" + val('pwm_min'),
       "pwmMax=" + val('pwm_max'),
@@ -362,7 +400,6 @@ void handleSet() {
   if (server.hasArg("vmax")) max_vel = server.arg("vmax").toFloat();
   if (server.hasArg("vmin")) min_vel = server.arg("vmin").toFloat();
   if (server.hasArg("ramp")) ramp_rate = server.arg("ramp").toInt();
-  if (server.hasArg("gyro")) k_gyro = server.arg("gyro").toFloat();
   if (server.hasArg("irGain")) k_ir = server.arg("irGain").toFloat();
   if (server.hasArg("pwmMin")) Turn_Min = server.arg("pwmMin").toInt();
   if (server.hasArg("pwmMax")) Turn_Max = server.arg("pwmMax").toInt();
@@ -372,38 +409,43 @@ void handleSet() {
 }
 
 void handleCalibHigh() {
-  max_IR[SIDX(S_L)] = constrain(ir_L - offset_upper, 0, 4095);
-  max_IR[SIDX(S_FL)] = constrain(ir_FL - offset_upper, 0, 4095);
-  max_IR[SIDX(S_FR)] = constrain(ir_FR - offset_upper, 0, 4095);
-  max_IR[SIDX(S_R)] = constrain(ir_R - offset_upper, 0, 4095);
+  IrSnapshot avg = averageIrSnapshot(20, 8);
+  max_IR[SIDX(S_L)] = constrain(avg.left - offset_upper, 0, 4095);
+  max_IR[SIDX(S_FL)] = constrain(avg.frontLeft - offset_upper, 0, 4095);
+  max_IR[SIDX(S_FR)] = constrain(avg.frontRight - offset_upper, 0, 4095);
+  max_IR[SIDX(S_R)] = constrain(avg.right - offset_upper, 0, 4095);
   saveRuntimeParams();
   server.send(200, "text/plain", "Đã chốt Ngưỡng Tường (Max)!");
 }
 
 void handleCalibLow() {
-  min_IR[SIDX(S_L)] = constrain(ir_L + offset_lower, 0, 4095);
-  min_IR[SIDX(S_FL)] = constrain(ir_FL + offset_lower, 0, 4095);
-  min_IR[SIDX(S_FR)] = constrain(ir_FR + offset_lower, 0, 4095);
-  min_IR[SIDX(S_R)] = constrain(ir_R + offset_lower, 0, 4095);
+  IrSnapshot avg = averageIrSnapshot(20, 8);
+  min_IR[SIDX(S_L)] = constrain(avg.left + offset_lower, 0, 4095);
+  min_IR[SIDX(S_FL)] = constrain(avg.frontLeft + offset_lower, 0, 4095);
+  min_IR[SIDX(S_FR)] = constrain(avg.frontRight + offset_lower, 0, 4095);
+  min_IR[SIDX(S_R)] = constrain(avg.right + offset_lower, 0, 4095);
   saveRuntimeParams();
   server.send(200, "text/plain", "Đã chốt Ngưỡng Trống (Min)!");
 }
 
 void handleCalibSide7() {
-  side_ref_L = constrain(ir_L, 0, 4095);
-  side_ref_R = constrain(ir_R, 0, 4095);
+  IrSnapshot avg = averageIrSnapshot(20, 8);
+  side_ref_L = constrain(avg.left, 0, 4095);
+  side_ref_R = constrain(avg.right, 0, 4095);
   saveRuntimeParams();
   server.send(200, "text/plain", "Da chot moc L/R 7cm!");
 }
 
 void handleCalibSideL7() {
-  side_ref_L = constrain(ir_L, 0, 4095);
+  IrSnapshot avg = averageIrSnapshot(20, 8);
+  side_ref_L = constrain(avg.left, 0, 4095);
   saveRuntimeParams();
   server.send(200, "text/plain", "Da chot moc L 7cm!");
 }
 
 void handleCalibSideR7() {
-  side_ref_R = constrain(ir_R, 0, 4095);
+  IrSnapshot avg = averageIrSnapshot(20, 8);
+  side_ref_R = constrain(avg.right, 0, 4095);
   saveRuntimeParams();
   server.send(200, "text/plain", "Da chot moc R 7cm!");
 }
@@ -413,6 +455,9 @@ void handleCmd() {
     String command = server.arg("val");
     if (command == "START") {
       requestedState = PID_RUN;
+      stateChangeRequested = true;
+    } else if (command == "ONE_CELL") {
+      requestedState = PID_RUN_ONE_CELL;
       stateChangeRequested = true;
     } else if (command == "STOP") {
       requestedState = IDLE;
@@ -429,6 +474,7 @@ void handleCmd() {
 }
 
 void handleData() {
+  IrSnapshot liveIr = latestRawIrSnapshot();
   char jsonBuf[1024];
   snprintf(jsonBuf, sizeof(jsonBuf),
            "{\"irL\":%d,\"irFL\":%d,\"irFR\":%d,\"irR\":%d,"
@@ -441,14 +487,17 @@ void handleData() {
            "\"kpL\":%.3f,\"kiL\":%.3f,\"kdL\":%.3f,"
            "\"kpR\":%.3f,\"kiR\":%.3f,\"kdR\":%.3f,"
            "\"accel\":%.2f,\"vmax\":%.1f,\"vmin\":%.1f,"
-           "\"ramp\":%d,\"gyro\":%.1f,\"irGain\":%.2f,\"pwmMin\":%d,\"pwmMax\":%d,"
+           "\"ramp\":%d,\"irGain\":%.2f,\"pwmMin\":%d,\"pwmMax\":%d,"
            "\"xungO\":%d}",
-           ir_L, ir_FL, ir_FR, ir_R, ir_L - min_IR[SIDX(S_L)], ir_FL - min_IR[SIDX(S_FL)],
-           ir_FR - min_IR[SIDX(S_FR)], ir_R - min_IR[SIDX(S_R)], pulseL, pulseR, pwmL, pwmR,
+           liveIr.left, liveIr.frontLeft, liveIr.frontRight, liveIr.right,
+           liveIr.left - min_IR[SIDX(S_L)],
+           liveIr.frontLeft - min_IR[SIDX(S_FL)],
+           liveIr.frontRight - min_IR[SIDX(S_FR)],
+           liveIr.right - min_IR[SIDX(S_R)], pulseL, pulseR, pwmL, pwmR,
            (int)carState, max_IR[SIDX(S_FL)], max_IR[SIDX(S_FR)], side_ref_L, side_ref_R,
            offset_upper, offset_lower,
            ir_deadband, base_pwm, Kp_L, Ki_L, Kd_L, Kp_R, Ki_R, Kd_R,
-           accel_rate, max_vel, min_vel, ramp_rate, k_gyro, k_ir, Turn_Min,
+           accel_rate, max_vel, min_vel, ramp_rate, k_ir, Turn_Min,
            Turn_Max, pulses_per_cell);
   server.send(200, "application/json", jsonBuf);
 }

@@ -6,7 +6,6 @@
 #include <esp_task_wdt.h>
 #include "Config.h"
 #include "Globals.h"
-#include "IMU.h"
 #include "Sensors.h"
 #include "Motor.h"
 #include "WallAvoidance.h"
@@ -23,12 +22,14 @@ const int FRONT_STOP_SENSOR_RIGHT = SENSOR_R;
 
 const int CONTROL_PERIOD_MS = 10;
 const float CONTROL_DT_SECONDS = CONTROL_PERIOD_MS / 1000.0f;
-const int SENSOR_DELTA_PWM_GAIN = 2;
 const int FRONT_STOP_EARLY_MARGIN = 1000;
 const int FRONT_STOP_BRAKE_RAMP_MULTIPLIER = 3;
+const int FRONT_STOP_CONFIRM_LOOPS = 2;
 const uint32_t MAIN_CONTROL_STACK_SIZE = 8192;
 const uint32_t CONTROL_TASK_WDT_TIMEOUT_SECONDS = 2;
 const uint32_t CONTROL_LOOP_SOFT_TIMEOUT_MS = 50;
+const int IR_STEER_FILTER_KEEP = 3;
+const int IR_STEER_FILTER_TOTAL = 4;
 
 long lastSpeedPulseL = 0;
 long lastSpeedPulseR = 0;
@@ -70,21 +71,46 @@ int frontCorrectionStart(int sensorIndex, const RuntimeParams &cfg)
   return constrain(max_IR[sensorIndex] + cfg.offset_upper, 0, 4095);
 }
 
-bool isFrontWallDetected(const IrSnapshot &ir, const RuntimeParams &cfg)
+int frontStopThreshold(int sensorIndex, const RuntimeParams &cfg)
 {
-  int leftThreshold = max(0, frontCorrectionStart(FRONT_STOP_SENSOR_LEFT, cfg) -
-                                 FRONT_STOP_EARLY_MARGIN);
-  int rightThreshold = max(0, frontCorrectionStart(FRONT_STOP_SENSOR_RIGHT, cfg) -
-                                  FRONT_STOP_EARLY_MARGIN);
+  if (!isSensorCalibrated(sensorIndex, cfg))
+    return 4095;
 
-  bool frontLeftWarn = isSensorCalibrated(FRONT_STOP_SENSOR_LEFT, cfg) &&
-                       sensorValueByIndex(ir, FRONT_STOP_SENSOR_LEFT) >
+  int correctionStart = frontCorrectionStart(sensorIndex, cfg);
+  int minimumUsableThreshold = max(30, cfg.ir_deadband / 2);
+  if (correctionStart <= minimumUsableThreshold)
+    return 4095;
+
+  int earlyMargin = min(FRONT_STOP_EARLY_MARGIN,
+                        max(20, correctionStart / 3));
+  return constrain(correctionStart - earlyMargin, minimumUsableThreshold, 4094);
+}
+
+bool isFrontWallDetectedByPair(const IrSnapshot &ir, const RuntimeParams &cfg,
+                               int leftSensor, int rightSensor)
+{
+  int leftThreshold = frontStopThreshold(leftSensor, cfg);
+  int rightThreshold = frontStopThreshold(rightSensor, cfg);
+
+  bool frontLeftWarn = isSensorCalibrated(leftSensor, cfg) &&
+                       sensorValueByIndex(ir, leftSensor) >
                            leftThreshold;
-  bool frontRightWarn = isSensorCalibrated(FRONT_STOP_SENSOR_RIGHT, cfg) &&
-                        sensorValueByIndex(ir, FRONT_STOP_SENSOR_RIGHT) >
+  bool frontRightWarn = isSensorCalibrated(rightSensor, cfg) &&
+                        sensorValueByIndex(ir, rightSensor) >
                             rightThreshold;
 
   return frontLeftWarn && frontRightWarn;
+}
+
+bool isFrontWallDetected(const IrSnapshot &ir, const RuntimeParams &cfg)
+{
+  return isFrontWallDetectedByPair(ir, cfg, FRONT_STOP_SENSOR_LEFT,
+                                   FRONT_STOP_SENSOR_RIGHT);
+}
+
+bool isOneCellFrontWallDetected(const IrSnapshot &ir, const RuntimeParams &cfg)
+{
+  return isFrontWallDetectedByPair(ir, cfg, SENSOR_L, SENSOR_R);
 }
 
 int computeWheelSpeedPid(float targetSpeed, float actualSpeed, float kp, float ki,
@@ -121,19 +147,29 @@ int sideWallCorrectionStart(int sensorIndex, const RuntimeParams &cfg)
   return constrain(max_IR[sensorIndex] + cfg.offset_upper, 0, 4095);
 }
 
-int sideErrorDeadband()
+int sideErrorDeadband(const RuntimeParams &cfg)
 {
-  return 0;
+  return max(20, cfg.ir_deadband / 2);
+}
+
+int sideErrorReleaseDeadband(const RuntimeParams &cfg)
+{
+  return max(8, sideErrorDeadband(cfg) / 2);
 }
 
 int sideCorrectionKick(const RuntimeParams &cfg)
 {
-  return constrain(cfg.Turn_Min, 25, 45);
+  return constrain(cfg.Turn_Min / 3, 6, 15);
+}
+
+int sideSteerLimit(const RuntimeParams &cfg)
+{
+  return constrain((cfg.Turn_Max - cfg.Turn_Min) / 3, 6, 22);
 }
 
 int sideCloseDirection(int sensorIndex, int sideRef, const RuntimeParams &cfg)
 {
-  int deadband = sideErrorDeadband();
+  int deadband = sideErrorDeadband(cfg);
   int wallRaw = -1;
   int emptyRaw = -1;
 
@@ -159,15 +195,28 @@ int sideCloseDirection(int sensorIndex, int sideRef, const RuntimeParams &cfg)
 
 int sideCloseError(int sensorIndex, const IrSnapshot &ir, const RuntimeParams &cfg)
 {
+  static bool leftActive = false;
+  static bool rightActive = false;
+  bool *active = (sensorIndex == SENSOR_L) ? &leftActive : &rightActive;
+
   int sideRef = sideWallCorrectionStart(sensorIndex, cfg);
-  if (sideRef >= 4095)
+  if (sideRef >= 4095) {
+    *active = false;
     return 0;
+  }
 
   int sideValue = sensorValueByIndex(ir, sensorIndex);
   int direction = sideCloseDirection(sensorIndex, sideRef, cfg);
   int error = (direction > 0) ? (sideValue - sideRef) : (sideRef - sideValue);
+  error = max(0, error);
 
-  return (error > sideErrorDeadband()) ? error : 0;
+  if (error > sideErrorDeadband(cfg)) {
+    *active = true;
+  } else if (error < sideErrorReleaseDeadband(cfg)) {
+    *active = false;
+  }
+
+  return *active ? error : 0;
 }
 
 int correctFromSideWalls(const IrSnapshot &ir, const RuntimeParams &cfg)
@@ -179,13 +228,8 @@ int correctFromSideWalls(const IrSnapshot &ir, const RuntimeParams &cfg)
 
   int rawSteer = leftError - rightError;
   int steer = (int)(rawSteer * cfg.k_ir);
-  if (steer > 0)
-    steer = max(steer, sideCorrectionKick(cfg));
-  else if (steer < 0)
-    steer = min(steer, -sideCorrectionKick(cfg));
 
-  return constrain(steer, -(cfg.Turn_Max - cfg.Turn_Min),
-                   cfg.Turn_Max - cfg.Turn_Min);
+  return constrain(steer, -sideSteerLimit(cfg), sideSteerLimit(cfg));
 }
 
 void resetWheelPidMemory()
@@ -264,10 +308,10 @@ void changeState(RunState newState)
   switch (newState)
   {
   case PID_RUN:
+  case PID_RUN_ONE_CELL:
     resetWheelPidMemory();
     virtualVel = 0.0f;
     virtualPos = 0.0f;
-    target_yaw = continuousYaw;
     isRunning = true;
     pixels.setPixelColor(0, pixels.Color(0, 255, 0));
     break;
@@ -290,8 +334,9 @@ void mainControlTask(void *pvParameters)
 {
   (void)pvParameters;
 
-  static int prev_ir_FL = 0;
-  static int prev_ir_FR = 0;
+  static int filteredSteerIR = 0;
+  static int frontWallStopConfirmCount = 0;
+  static bool frontWallStopLatched = false;
   TickType_t lastWakeTime = xTaskGetTickCount();
 
   setupControlTaskWatchdog();
@@ -299,8 +344,6 @@ void mainControlTask(void *pvParameters)
   for (;;)
   {
     uint32_t loopStartMs = millis();
-    int boostPwmL = 0;
-    int boostPwmR = 0;
 
     applyPendingRuntimeParamsAtSafePoint();
 
@@ -308,15 +351,39 @@ void mainControlTask(void *pvParameters)
     {
       changeState(requestedState);
       stateChangeRequested = false;
+      frontWallStopConfirmCount = 0;
+      frontWallStopLatched = false;
     }
 
     RuntimeParams cfg = captureActiveRuntimeParams();
+    if (!isRunning)
+    {
+      filteredSteerIR = 0;
+      frontWallStopConfirmCount = 0;
+      frontWallStopLatched = false;
+    }
 
     IrSnapshot rawIr;
     readIR_TDM(&rawIr);
     IrSnapshot ir = getIrSnapshot();
 
-    bool frontWallStop = (isRunning && isFrontWallDetected(rawIr, cfg));
+    bool frontWallSeen =
+        isRunning &&
+        ((carState == PID_RUN_ONE_CELL) ? isOneCellFrontWallDetected(rawIr, cfg)
+                                        : isFrontWallDetected(rawIr, cfg));
+    if (frontWallSeen)
+    {
+      if (frontWallStopConfirmCount < FRONT_STOP_CONFIRM_LOOPS)
+        frontWallStopConfirmCount++;
+      if (frontWallStopConfirmCount >= FRONT_STOP_CONFIRM_LOOPS)
+        frontWallStopLatched = true;
+    }
+    else if (!frontWallStopLatched)
+    {
+      frontWallStopConfirmCount = 0;
+    }
+
+    bool frontWallStop = isRunning && frontWallStopLatched;
     if (frontWallStop)
     {
       int brakeRamp = max(1, cfg.ramp_rate * FRONT_STOP_BRAKE_RAMP_MULTIPLIER);
@@ -335,58 +402,45 @@ void mainControlTask(void *pvParameters)
     {
       if (isRunning)
       {
-        int deltaFL = ir.frontLeft - prev_ir_FL;
-        int deltaFR = ir.frontRight - prev_ir_FR;
-        boostPwmL = (deltaFL > 0) ? (SENSOR_DELTA_PWM_GAIN * deltaFL) : 0;
-        boostPwmR = (deltaFR > 0) ? (SENSOR_DELTA_PWM_GAIN * deltaFR) : 0;
-      }
-      prev_ir_FL = ir.frontLeft;
-      prev_ir_FR = ir.frontRight;
-
-      updateIMU(CONTROL_DT_SECONDS);
-
-      if (isRunning)
-      {
         switch (carState)
         {
         case TEST_L:
-          setLeftMotor(constrain(cfg.base_pwm + boostPwmL, 0, cfg.Turn_Max));
-          setRightMotor(constrain(boostPwmR, 0, cfg.Turn_Max));
+          setLeftMotor(constrain(cfg.base_pwm, 0, cfg.Turn_Max));
+          setRightMotor(0);
           break;
 
         case TEST_R:
-          setRightMotor(constrain(cfg.base_pwm + boostPwmR, 0, cfg.Turn_Max));
-          setLeftMotor(constrain(boostPwmL, 0, cfg.Turn_Max));
+          setRightMotor(constrain(cfg.base_pwm, 0, cfg.Turn_Max));
+          setLeftMotor(0);
           break;
 
         case PID_RUN:
+        case PID_RUN_ONE_CELL:
         {
           PulseSnapshot pulses = getPulseSnapshot();
           long currentPulseL = pulses.left;
           long currentPulseR = pulses.right;
           long travelL = absPulse(currentPulseL);
           long travelR = absPulse(currentPulseR);
-          WallAvoidanceResult wallAvoidance =
-              computeStraightWallAvoidance(ir, cfg);
-          int steerIR = wallAvoidance.active ? wallAvoidance.steer
-                                             : correctFromSideWalls(ir, cfg);
-
-          if (steerIR != 0)
+          long travelAvg = (travelL + travelR) / 2;
+          if (carState == PID_RUN_ONE_CELL &&
+              travelAvg >= cfg.pulses_per_cell)
           {
-            resetWheelPidMemory();
-
-            int minSteerPower = wallAvoidance.active ? wallAvoidanceKick(cfg)
-                                                     : sideCorrectionKick(cfg);
-            int steerPower = constrain(abs(steerIR), minSteerPower,
-                                       cfg.Turn_Max);
-            int outsidePwm = cfg.Turn_Max;
-            int insidePwm = constrain(cfg.base_pwm - steerPower, 0, cfg.Turn_Max);
-            int targetPwm_L = (steerIR > 0) ? outsidePwm : insidePwm;
-            int targetPwm_R = (steerIR > 0) ? insidePwm : outsidePwm;
-
-            setLeftMotor(targetPwm_L);
-            setRightMotor(targetPwm_R);
+            changeState(IDLE);
             break;
+          }
+
+          int steerIR = 0;
+          if (carState == PID_RUN)
+          {
+            WallAvoidanceResult wallAvoidance =
+                computeStraightWallAvoidance(ir, cfg);
+            steerIR = wallAvoidance.active ? wallAvoidance.steer
+                                           : correctFromSideWalls(ir, cfg);
+          }
+          else
+          {
+            filteredSteerIR = 0;
           }
 
           float speedL = (float)absPulse(currentPulseL - lastSpeedPulseL);
@@ -396,7 +450,7 @@ void mainControlTask(void *pvParameters)
 
           virtualVel = constrain(virtualVel + cfg.accel_rate, cfg.min_vel,
                                  cfg.max_vel);
-          virtualPos = (travelL + travelR) * 0.5f;
+          virtualPos = travelAvg;
 
           int pidTrimL = computeWheelSpeedPid(virtualVel, speedL, cfg.Kp_L,
                                               cfg.Ki_L, cfg.Kd_L, integralL,
@@ -406,14 +460,18 @@ void mainControlTask(void *pvParameters)
                                               prevErrR, dFilterR);
           int basePwmL = keepMotorRunningPwm(cfg.base_pwm + pidTrimL, cfg);
           int basePwmR = keepMotorRunningPwm(cfg.base_pwm + pidTrimR, cfg);
-          float yawError = continuousYaw - target_yaw;
-          int totalSteer = (int)(yawError * cfg.k_gyro);
+          int steerLimit = max(0, cfg.Turn_Max - cfg.Turn_Min);
+          filteredSteerIR =
+              (filteredSteerIR * IR_STEER_FILTER_KEEP + steerIR) /
+              IR_STEER_FILTER_TOTAL;
+          if (steerIR == 0 && abs(filteredSteerIR) <= 1)
+            filteredSteerIR = 0;
+
+          int totalSteer = constrain(filteredSteerIR,
+                                     -steerLimit, steerLimit);
 
           int targetPwm_L = keepMotorRunningPwm(basePwmL + totalSteer, cfg);
           int targetPwm_R = keepMotorRunningPwm(basePwmR - totalSteer, cfg);
-
-          targetPwm_L = constrain(targetPwm_L + boostPwmL, 0, cfg.Turn_Max);
-          targetPwm_R = constrain(targetPwm_R + boostPwmR, 0, cfg.Turn_Max);
 
           int newPwm_L = applyRateLimit(targetPwm_L, pwmL, cfg.ramp_rate);
           int newPwm_R = applyRateLimit(targetPwm_R, pwmR, cfg.ramp_rate);
@@ -448,7 +506,6 @@ void setup()
 
   initSensors();
   initMotors();
-  initIMU();
   setupWebServer();
 
   xTaskCreatePinnedToCore(
