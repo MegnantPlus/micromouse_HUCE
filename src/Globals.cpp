@@ -24,8 +24,16 @@ void copyRuntimeParamsFromGlobals(RuntimeParams &params) {
   params.ramp_rate = ramp_rate;
   params.k_gyro = k_gyro;
   params.k_ir = k_ir;
+  params.wall_steer_limit = wall_steer_limit;
+  params.wheel_trim_L = wheel_trim_L;
+  params.wheel_trim_R = wheel_trim_R;
   params.pulses_per_cell = pulses_per_cell;
+  params.front_stop_early_margin = front_stop_early_margin;
+  params.maze_dead_end_backup_pulses = maze_dead_end_backup_pulses;
+  params.maze_dead_end_backup_pwm = maze_dead_end_backup_pwm;
   params.side_ref_L = side_ref_L;
+  params.side_ref_FL = side_ref_FL;
+  params.side_ref_FR = side_ref_FR;
   params.side_ref_R = side_ref_R;
   params.offset_upper = offset_upper;
   params.offset_lower = offset_lower;
@@ -52,8 +60,16 @@ void copyRuntimeParamsToGlobals(const RuntimeParams &params) {
   ramp_rate = params.ramp_rate;
   k_gyro = params.k_gyro;
   k_ir = params.k_ir;
+  wall_steer_limit = params.wall_steer_limit;
+  wheel_trim_L = params.wheel_trim_L;
+  wheel_trim_R = params.wheel_trim_R;
   pulses_per_cell = params.pulses_per_cell;
+  front_stop_early_margin = params.front_stop_early_margin;
+  maze_dead_end_backup_pulses = params.maze_dead_end_backup_pulses;
+  maze_dead_end_backup_pwm = params.maze_dead_end_backup_pwm;
   side_ref_L = params.side_ref_L;
+  side_ref_FL = params.side_ref_FL;
+  side_ref_FR = params.side_ref_FR;
   side_ref_R = params.side_ref_R;
   offset_upper = params.offset_upper;
   offset_lower = params.offset_lower;
@@ -94,9 +110,17 @@ float min_vel = 5.0;
 
 int ramp_rate = 10; // Gioi han tang toc (slew-rate limiter)
 float k_gyro = 6.0;
+int wall_steer_limit = 22;
+int wheel_trim_L = 0;
+int wheel_trim_R = 0;
 float k_ir = 0.1; // Hệ số bám tường IR
 int pulses_per_cell = 980;
+int front_stop_early_margin = 800;
+int maze_dead_end_backup_pulses = 980;
+int maze_dead_end_backup_pwm = 55;
 int side_ref_L = 4095;
+int side_ref_FL = 4095;
+int side_ref_FR = 4095;
 int side_ref_R = 4095;
 
 // ---------------------------------------------------------
@@ -120,6 +144,10 @@ volatile bool isRunning = false;
 volatile bool isTurningTask = false;
 volatile uint32_t controlTaskLastLoopMs = 0;
 volatile uint32_t controlTaskOverrunCount = 0;
+volatile int debugSideErrorL = 0;
+volatile int debugSideErrorR = 0;
+volatile int debugSteerIR = 0;
+volatile int debugTotalSteer = 0;
 
 RuntimeParams captureActiveRuntimeParams() {
   RuntimeParams params;

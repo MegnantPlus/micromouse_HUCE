@@ -37,8 +37,16 @@ struct RuntimeParams {
 	int ramp_rate;
 	float k_gyro;
 	float k_ir;
+	int wall_steer_limit;
+	int wheel_trim_L;
+	int wheel_trim_R;
 	int pulses_per_cell;
+	int front_stop_early_margin;
+	int maze_dead_end_backup_pulses;
+	int maze_dead_end_backup_pwm;
 	int side_ref_L;
+	int side_ref_FL;
+	int side_ref_FR;
 	int side_ref_R;
 	int offset_upper;
 	int offset_lower;
@@ -71,8 +79,16 @@ extern float min_vel;
 extern int ramp_rate;
 extern float k_gyro;
 extern float k_ir;
+extern int wall_steer_limit;
+extern int wheel_trim_L;
+extern int wheel_trim_R;
 extern int pulses_per_cell;
+extern int front_stop_early_margin;
+extern int maze_dead_end_backup_pulses;
+extern int maze_dead_end_backup_pwm;
 extern int side_ref_L;
+extern int side_ref_FL;
+extern int side_ref_FR;
 extern int side_ref_R;
 
 // --- BIẾN NGƯỠNG & ĐIỀU KHIỂN BĂM XUNG ---
@@ -103,6 +119,10 @@ extern volatile bool isRunning;
 extern volatile bool isTurningTask;
 extern volatile uint32_t controlTaskLastLoopMs;
 extern volatile uint32_t controlTaskOverrunCount;
+extern volatile int debugSideErrorL;
+extern volatile int debugSideErrorR;
+extern volatile int debugSteerIR;
+extern volatile int debugTotalSteer;
 
 RuntimeParams captureActiveRuntimeParams();
 void applyActiveRuntimeParams(const RuntimeParams &params);

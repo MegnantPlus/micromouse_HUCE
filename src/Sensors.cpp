@@ -89,5 +89,10 @@ void readIR_TDM(IrSnapshot *rawOut) {
     *rawOut = raw;
   }
 
+  raw_ir_L = raw.left;
+  raw_ir_FL = raw.frontLeft;
+  raw_ir_FR = raw.frontRight;
+  raw_ir_R = raw.right;
+
   publishIrSnapshot(next);
 }
