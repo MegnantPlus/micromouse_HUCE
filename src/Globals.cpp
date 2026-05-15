@@ -24,6 +24,9 @@ void copyRuntimeParamsFromGlobals(RuntimeParams &params) {
   params.ramp_rate = ramp_rate;
   params.k_gyro = k_gyro;
   params.k_ir = k_ir;
+  params.wall_steer_limit = wall_steer_limit;
+  params.wheel_trim_L = wheel_trim_L;
+  params.wheel_trim_R = wheel_trim_R;
   params.pulses_per_cell = pulses_per_cell;
   params.side_ref_L = side_ref_L;
   params.side_ref_FL = side_ref_FL;
@@ -54,6 +57,9 @@ void copyRuntimeParamsToGlobals(const RuntimeParams &params) {
   ramp_rate = params.ramp_rate;
   k_gyro = params.k_gyro;
   k_ir = params.k_ir;
+  wall_steer_limit = params.wall_steer_limit;
+  wheel_trim_L = params.wheel_trim_L;
+  wheel_trim_R = params.wheel_trim_R;
   pulses_per_cell = params.pulses_per_cell;
   side_ref_L = params.side_ref_L;
   side_ref_FL = params.side_ref_FL;
@@ -98,6 +104,9 @@ float min_vel = 5.0;
 
 int ramp_rate = 10; // Gioi han tang toc (slew-rate limiter)
 float k_gyro = 6.0;
+int wall_steer_limit = 22;
+int wheel_trim_L = 0;
+int wheel_trim_R = 0;
 float k_ir = 0.1; // Hệ số bám tường IR
 int pulses_per_cell = 980;
 int side_ref_L = 4095;

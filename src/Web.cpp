@@ -31,7 +31,11 @@ void clampRuntimeParams() {
   min_vel = max(0.0f, min_vel);
   max_vel = max(min_vel, max_vel);
   accel_rate = max(0.01f, accel_rate);
+  k_gyro = max(0.0f, k_gyro);
   k_ir = max(0.0f, k_ir);
+  wall_steer_limit = constrain(wall_steer_limit, 4, max(4, Turn_Max - Turn_Min));
+  wheel_trim_L = constrain(wheel_trim_L, -60, 60);
+  wheel_trim_R = constrain(wheel_trim_R, -60, 60);
   ir_deadband = max(0, ir_deadband);
   offset_upper = max(0, offset_upper);
   offset_lower = max(0, offset_lower);
@@ -60,6 +64,9 @@ void loadRuntimeParams() {
   ramp_rate = settings.getInt("ramp", ramp_rate);
   k_gyro = settings.getFloat("gyro", k_gyro);
   k_ir = settings.getFloat("irGain", k_ir);
+  wall_steer_limit = settings.getInt("wallMax", wall_steer_limit);
+  wheel_trim_L = settings.getInt("trimL", wheel_trim_L);
+  wheel_trim_R = settings.getInt("trimR", wheel_trim_R);
   Turn_Min = settings.getInt("pwmMin", Turn_Min);
   Turn_Max = settings.getInt("pwmMax", Turn_Max);
   pulses_per_cell = settings.getInt("xungO", pulses_per_cell);
@@ -102,6 +109,9 @@ void saveRuntimeParams() {
   settings.putInt("ramp", ramp_rate);
   settings.putFloat("gyro", k_gyro);
   settings.putFloat("irGain", k_ir);
+  settings.putInt("wallMax", wall_steer_limit);
+  settings.putInt("trimL", wheel_trim_L);
+  settings.putInt("trimR", wheel_trim_R);
   settings.putInt("pwmMin", Turn_Min);
   settings.putInt("pwmMax", Turn_Max);
   settings.putInt("xungO", pulses_per_cell);
@@ -194,12 +204,15 @@ const char index_html[] PROGMEM = R"rawliteral(
         <label>G.Toc <input type="number" id="accel" step="0.01" value="0.2"></label>
         <label>V.Max <input type="number" id="vmax" step="0.1" value="15.0"></label>
         <label>V.Min <input type="number" id="vmin" step="0.1" value="5.0"></label>
+        <label>Bam Tuong <input type="number" id="ir_gain" step="0.01" value="0.1"></label>
+        <label>Wall Max <input type="number" id="wall_steer" step="1" value="22"></label>
+        <label>Trim L <input type="number" id="trim_l" step="1" value="0"></label>
+        <label>Trim R <input type="number" id="trim_r" step="1" value="0"></label>
       </div>
       <div class="group">
         <h4>KHUNG GAM</h4>
         <label>Ramp <input type="number" id="ramp" step="1" value="10"></label>
         <label>Gyro <input type="number" id="gyro" step="0.1" value="6.0"></label>
-        <label>IR Gain <input type="number" id="ir_gain" step="0.01" value="0.1"></label>
         <label>PWM Min <input type="number" id="pwm_min" step="1" value="35"></label>
         <label>PWM Max <input type="number" id="pwm_max" step="1" value="100"></label>
         <label>Xung/20cm <input type="number" id="xung_o" step="1" value="980"></label>
@@ -211,10 +224,9 @@ const char index_html[] PROGMEM = R"rawliteral(
       <button class="btn btn-calib-l" onclick="calib('Low').then(r=>r.text())">🌌 SET TRỐNG (RAW + OFF)</button>
     </div>
     <div class="grid-2">
-      <button class="btn" style="background:#16a085;" onclick="calib('SideL7').then(r=>r.text())">SET FL 7CM</button>
-      <button class="btn" style="background:#16a085;" onclick="calib('SideR7').then(r=>r.text())">SET FR 7CM</button>
+      <button class="btn" style="background:#16a085;" onclick="calib('SideL7').then(r=>r.text())">SET TUONG TRAI</button>
+      <button class="btn" style="background:#16a085;" onclick="calib('SideR7').then(r=>r.text())">SET TUONG PHAI</button>
     </div>
-    <button class="btn" style="background:#117a65;" onclick="calib('Side7').then(r=>r.text())">SET L/R 7CM</button>
     <button class="btn btn-save" onclick="saveAll()">💾 LƯU THÔNG SỐ BĂM XUNG</button>
     
     <div class="grid-2">
@@ -244,7 +256,8 @@ const char index_html[] PROGMEM = R"rawliteral(
     offUp: 'off_up', offLow: 'off_low', deadband: 'deadband', base: 'basepwm',
     kpL: 'kp_l', kiL: 'ki_l', kdL: 'kd_l', kpR: 'kp_r', kiR: 'ki_r',
     kdR: 'kd_r', accel: 'accel', vmax: 'vmax', vmin: 'vmin',
-    ramp: 'ramp', gyro: 'gyro', irGain: 'ir_gain', pwmMin: 'pwm_min', pwmMax: 'pwm_max',
+    ramp: 'ramp', gyro: 'gyro', irGain: 'ir_gain', wallMax: 'wall_steer',
+    trimL: 'trim_l', trimR: 'trim_r', pwmMin: 'pwm_min', pwmMax: 'pwm_max',
     xungO: 'xung_o'
   };
   function resizeCanvas() { canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight; }
@@ -309,6 +322,9 @@ const char index_html[] PROGMEM = R"rawliteral(
       "ramp=" + val('ramp'),
       "gyro=" + val('gyro'),
       "irGain=" + val('ir_gain'),
+      "wallMax=" + val('wall_steer'),
+      "trimL=" + val('trim_l'),
+      "trimR=" + val('trim_r'),
       "pwmMin=" + val('pwm_min'),
       "pwmMax=" + val('pwm_max'),
       "xungO=" + val('xung_o')
@@ -384,6 +400,9 @@ void handleSet() {
   if (server.hasArg("ramp")) ramp_rate = server.arg("ramp").toInt();
   if (server.hasArg("gyro")) k_gyro = server.arg("gyro").toFloat();
   if (server.hasArg("irGain")) k_ir = server.arg("irGain").toFloat();
+  if (server.hasArg("wallMax")) wall_steer_limit = server.arg("wallMax").toInt();
+  if (server.hasArg("trimL")) wheel_trim_L = server.arg("trimL").toInt();
+  if (server.hasArg("trimR")) wheel_trim_R = server.arg("trimR").toInt();
   if (server.hasArg("pwmMin")) Turn_Min = server.arg("pwmMin").toInt();
   if (server.hasArg("pwmMax")) Turn_Max = server.arg("pwmMax").toInt();
   if (server.hasArg("xungO")) pulses_per_cell = server.arg("xungO").toInt();
@@ -409,28 +428,18 @@ void handleCalibLow() {
   server.send(200, "text/plain", "Đã chốt Ngưỡng Trống (Min)!");
 }
 
-void handleCalibSide7() {
-  IrSnapshot liveIr = latestRawIrSnapshot();
-  side_ref_L = constrain(liveIr.left, 0, 4095);
-  side_ref_FL = constrain(liveIr.frontLeft, 0, 4095);
-  side_ref_FR = constrain(liveIr.frontRight, 0, 4095);
-  side_ref_R = constrain(liveIr.right, 0, 4095);
-  saveRuntimeParams();
-  server.send(200, "text/plain", "Da chot moc L/FL/FR/R 7cm!");
-}
-
 void handleCalibSideL7() {
   IrSnapshot liveIr = latestRawIrSnapshot();
   side_ref_FL = constrain(liveIr.frontLeft, 0, 4095);
   saveRuntimeParams();
-  server.send(200, "text/plain", "Da chot moc FL 7cm!");
+  server.send(200, "text/plain", "Da chot moc tuong trai!");
 }
 
 void handleCalibSideR7() {
   IrSnapshot liveIr = latestRawIrSnapshot();
   side_ref_FR = constrain(liveIr.frontRight, 0, 4095);
   saveRuntimeParams();
-  server.send(200, "text/plain", "Da chot moc FR 7cm!");
+  server.send(200, "text/plain", "Da chot moc tuong phai!");
 }
 
 void handleCmd() {
@@ -458,7 +467,7 @@ void handleCmd() {
 
 void handleData() {
   IrSnapshot liveIr = latestRawIrSnapshot();
-  char jsonBuf[1280];
+  char jsonBuf[1400];
   snprintf(jsonBuf, sizeof(jsonBuf),
            "{\"irL\":%d,\"irFL\":%d,\"irFR\":%d,\"irR\":%d,"
            "\"dL\":%d,\"dFL\":%d,\"dFR\":%d,\"dR\":%d,"
@@ -471,7 +480,9 @@ void handleData() {
            "\"kpL\":%.3f,\"kiL\":%.3f,\"kdL\":%.3f,"
            "\"kpR\":%.3f,\"kiR\":%.3f,\"kdR\":%.3f,"
            "\"accel\":%.2f,\"vmax\":%.1f,\"vmin\":%.1f,"
-           "\"ramp\":%d,\"gyro\":%.1f,\"irGain\":%.2f,\"pwmMin\":%d,\"pwmMax\":%d,"
+           "\"ramp\":%d,\"gyro\":%.1f,\"irGain\":%.2f,"
+           "\"wallMax\":%d,\"trimL\":%d,\"trimR\":%d,"
+           "\"pwmMin\":%d,\"pwmMax\":%d,"
            "\"xungO\":%d}",
            liveIr.left, liveIr.frontLeft, liveIr.frontRight, liveIr.right,
            liveIr.left - min_IR[SIDX(S_L)],
@@ -483,8 +494,9 @@ void handleData() {
            debugSideErrorL, debugSideErrorR, debugSteerIR, debugTotalSteer,
            offset_upper, offset_lower,
            ir_deadband, base_pwm, Kp_L, Ki_L, Kd_L, Kp_R, Ki_R, Kd_R,
-           accel_rate, max_vel, min_vel, ramp_rate, k_gyro, k_ir, Turn_Min,
-           Turn_Max, pulses_per_cell);
+           accel_rate, max_vel, min_vel, ramp_rate, k_gyro, k_ir,
+           wall_steer_limit, wheel_trim_L, wheel_trim_R, Turn_Min, Turn_Max,
+           pulses_per_cell);
   server.send(200, "application/json", jsonBuf);
 }
 
@@ -507,10 +519,8 @@ void setupWebServer() {
   server.on("/set", handleSet);
   server.on("/calibHigh", handleCalibHigh);
   server.on("/calibLow", handleCalibLow);
-  server.on("/calibSide7", handleCalibSide7);
   server.on("/calibSideL7", handleCalibSideL7);
   server.on("/calibSideR7", handleCalibSideR7);
-  server.on("/calibSide5", handleCalibSide7);
   server.on("/cmd", handleCmd);
   server.on("/data", handleData);
 

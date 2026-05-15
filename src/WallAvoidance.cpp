@@ -18,7 +18,7 @@ int closeWallThreshold(int sensorIndex, const RuntimeParams &cfg) {
 }
 
 int wallAvoidanceKick(const RuntimeParams &cfg) {
-  return constrain(cfg.Turn_Min, 25, 45);
+  return constrain(cfg.Turn_Min / 4, 5, 12);
 }
 
 WallAvoidanceResult computeStraightWallAvoidance(const IrSnapshot &ir,
@@ -27,7 +27,7 @@ WallAvoidanceResult computeStraightWallAvoidance(const IrSnapshot &ir,
   result.leftThreshold = closeWallThreshold(SENSOR_FL_INDEX, cfg);
   result.rightThreshold = closeWallThreshold(SENSOR_FR_INDEX, cfg);
 
-  int triggerDeadband = max(10, cfg.ir_deadband / 2);
+  int triggerDeadband = constrain(cfg.ir_deadband / 4, 12, 40);
   if (isWallThresholdReady(SENSOR_FL_INDEX, cfg)) {
     result.leftError =
         max(0, ir.frontLeft - result.leftThreshold - triggerDeadband);
@@ -38,7 +38,8 @@ WallAvoidanceResult computeStraightWallAvoidance(const IrSnapshot &ir,
   }
 
   int rawSteer = result.leftError - result.rightError;
-  int steerLimit = max(0, cfg.Turn_Max - cfg.Turn_Min);
+  int steerLimit = constrain(cfg.wall_steer_limit, 4,
+                             max(4, cfg.Turn_Max - cfg.Turn_Min));
   if (rawSteer > 0) {
     result.steer = max((int)(rawSteer * cfg.k_ir), wallAvoidanceKick(cfg));
   } else if (rawSteer < 0) {
