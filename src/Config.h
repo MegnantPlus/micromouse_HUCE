@@ -40,5 +40,6 @@ enum RunState {
   DECEL_STOP,
   TEST_L,
   TEST_R,
-  PID_RUN_ONE_CELL
+  PID_RUN_ONE_CELL,
+  MAZE_RIGHT_HAND
 };

@@ -11,6 +11,7 @@
 #include "Motor.h"
 #include "WallAvoidance.h"
 #include "Web.h"
+#include <math.h>
 
 namespace
 {
@@ -31,11 +32,38 @@ const uint32_t CONTROL_TASK_WDT_TIMEOUT_SECONDS = 2;
 const uint32_t CONTROL_LOOP_SOFT_TIMEOUT_MS = 50;
 const int IR_STEER_FILTER_KEEP = 4;
 const int IR_STEER_FILTER_TOTAL = 5;
+const float MAZE_TURN_RIGHT_DEG = -90.0f;
+const float MAZE_TURN_LEFT_DEG = 90.0f;
+const float MAZE_TURN_BACK_DEG = 180.0f;
+const uint32_t MAZE_TURN_90_TIMEOUT_MS = 1800;
+const uint32_t MAZE_TURN_180_TIMEOUT_MS = 3200;
 
 long lastSpeedPulseL = 0;
 long lastSpeedPulseR = 0;
 
 void changeState(RunState newState);
+void resetRunProfileAndPidMemory();
+int sideCloseDirection(int sensorIndex, int sideRef, const RuntimeParams &cfg);
+
+enum MazePhase
+{
+  MAZE_DECIDE,
+  MAZE_TURNING,
+  MAZE_RUN_TO_WALL,
+  MAZE_BRAKE_AT_WALL
+};
+
+struct MazeWalls
+{
+  bool left;
+  bool front;
+  bool right;
+};
+
+MazePhase mazePhase = MAZE_DECIDE;
+float mazeTurnStartYaw = 0.0f;
+float mazeTurnDegrees = 0.0f;
+uint32_t mazeTurnStartMs = 0;
 
 long absPulse(long value)
 {
@@ -63,6 +91,13 @@ bool isSensorCalibrated(int sensorIndex, const RuntimeParams &cfg)
 {
   int margin = max(50, cfg.ir_deadband / 2);
   return max_IR[sensorIndex] < 4095 - margin;
+}
+
+bool isMazeSensorWallCalibrated(int sensorIndex, const RuntimeParams &cfg)
+{
+  int margin = max(50, cfg.ir_deadband / 2);
+  return max_IR[sensorIndex] < 4095 - margin &&
+         min_IR[sensorIndex] > margin;
 }
 
 int frontCorrectionStart(int sensorIndex, const RuntimeParams &cfg)
@@ -115,6 +150,80 @@ int sideReferenceByIndex(int sensorIndex)
   if (sensorIndex == SENSOR_FR)
     return side_ref_FR;
   return (sensorIndex == SENSOR_L) ? side_ref_L : side_ref_R;
+}
+
+bool isMazeSensorReady(int sensorIndex, const RuntimeParams &cfg)
+{
+  return isMazeSensorWallCalibrated(sensorIndex, cfg) ||
+         sideReferenceByIndex(sensorIndex) < 4095;
+}
+
+bool isMazeWallBySensor(int sensorIndex, const IrSnapshot &ir,
+                        const RuntimeParams &cfg)
+{
+  int value = sensorValueByIndex(ir, sensorIndex);
+  int deadband = constrain(cfg.ir_deadband / 4, 10, 60);
+
+  if (isMazeSensorWallCalibrated(sensorIndex, cfg))
+  {
+    int wallRef = constrain(max_IR[sensorIndex] + cfg.offset_upper, 0, 4095);
+    int emptyRef = constrain(min_IR[sensorIndex] - cfg.offset_lower, 0, 4095);
+    int diff = wallRef - emptyRef;
+    if (abs(diff) <= deadband)
+      return false;
+
+    int threshold = (wallRef + emptyRef) / 2;
+    return (diff > 0) ? (value >= threshold) : (value <= threshold);
+  }
+
+  int sideRef = sideReferenceByIndex(sensorIndex);
+  if (sideRef < 4095)
+  {
+    int direction = sideCloseDirection(sensorIndex, sideRef, cfg);
+    return (direction > 0) ? (value >= sideRef + deadband)
+                           : (value <= sideRef - deadband);
+  }
+
+  return false;
+}
+
+MazeWalls readMazeWalls(const IrSnapshot &ir, const RuntimeParams &cfg)
+{
+  MazeWalls walls = {};
+  walls.front = isMazeWallBySensor(SENSOR_L, ir, cfg) ||
+                isMazeWallBySensor(SENSOR_R, ir, cfg);
+  walls.left = isMazeWallBySensor(SENSOR_FL, ir, cfg);
+  walls.right = isMazeWallBySensor(SENSOR_FR, ir, cfg);
+
+  return walls;
+}
+
+void resetMazeRunner()
+{
+  mazePhase = MAZE_RUN_TO_WALL;
+  mazeTurnStartYaw = continuousYaw;
+  mazeTurnDegrees = 0.0f;
+  mazeTurnStartMs = 0;
+  target_yaw = continuousYaw;
+  isTurningTask = false;
+}
+
+void startMazeTurn(float turnDegrees)
+{
+  mazePhase = MAZE_TURNING;
+  mazeTurnDegrees = turnDegrees;
+  mazeTurnStartYaw = continuousYaw;
+  mazeTurnStartMs = millis();
+  isTurningTask = true;
+}
+
+void startMazeStraightRun()
+{
+  resetMotorsAndPID();
+  resetRunProfileAndPidMemory();
+  target_yaw = continuousYaw;
+  mazePhase = MAZE_RUN_TO_WALL;
+  isTurningTask = false;
 }
 
 int sideWallCorrectionStart(int sensorIndex, const RuntimeParams &cfg)
@@ -288,12 +397,21 @@ void changeState(RunState newState)
   {
   case PID_RUN:
   case PID_RUN_ONE_CELL:
+  case MAZE_RIGHT_HAND:
     resetWheelPidMemory();
     virtualVel = 0.0f;
     virtualPos = 0.0f;
     target_yaw = continuousYaw;
     isRunning = true;
-    pixels.setPixelColor(0, pixels.Color(0, 255, 0));
+    if (newState == MAZE_RIGHT_HAND)
+    {
+      resetMazeRunner();
+      pixels.setPixelColor(0, pixels.Color(0, 0, 255));
+    }
+    else
+    {
+      pixels.setPixelColor(0, pixels.Color(0, 255, 0));
+    }
     break;
   case TEST_L:
   case TEST_R:
@@ -303,6 +421,7 @@ void changeState(RunState newState)
   case IDLE:
   default:
     isRunning = false;
+    resetMazeRunner();
     applyPendingRuntimeParamsAtSafePoint();
     pixels.setPixelColor(0, pixels.Color(255, 0, 0));
     break;
@@ -350,7 +469,9 @@ void mainControlTask(void *pvParameters)
       filteredIrSteer = 0;
     }
 
-    bool frontWallStop = (isRunning && isFrontWallDetected(rawIr, cfg));
+    bool frontWallStop =
+        (isRunning && carState != MAZE_RIGHT_HAND &&
+         isFrontWallDetected(rawIr, cfg));
     if (frontWallStop)
     {
       int brakeRamp = max(1, cfg.ramp_rate * FRONT_STOP_BRAKE_RAMP_MULTIPLIER);
@@ -408,6 +529,163 @@ void mainControlTask(void *pvParameters)
             changeState(IDLE);
             break;
           }
+
+          WallAvoidanceResult wallAvoidance =
+              computeStraightWallAvoidance(ir, cfg);
+          int sideSteer = correctFromSideWalls(ir, cfg);
+          int steerIR = wallAvoidance.active ? wallAvoidance.steer : sideSteer;
+          debugSteerIR = steerIR;
+          filteredIrSteer =
+              (filteredIrSteer * IR_STEER_FILTER_KEEP + steerIR) /
+              IR_STEER_FILTER_TOTAL;
+          if (steerIR == 0 && abs(filteredIrSteer) <= 1)
+            filteredIrSteer = 0;
+
+          float speedL = (float)absPulse(currentPulseL - lastSpeedPulseL);
+          float speedR = (float)absPulse(currentPulseR - lastSpeedPulseR);
+          lastSpeedPulseL = currentPulseL;
+          lastSpeedPulseR = currentPulseR;
+
+          virtualVel = constrain(virtualVel + cfg.accel_rate, cfg.min_vel,
+                                 cfg.max_vel);
+          virtualPos = travelAvg;
+
+          int pidTrimL = computeWheelSpeedPid(virtualVel, speedL, cfg.Kp_L,
+                                              cfg.Ki_L, cfg.Kd_L, integralL,
+                                              prevErrL, dFilterL);
+          int pidTrimR = computeWheelSpeedPid(virtualVel, speedR, cfg.Kp_R,
+                                              cfg.Ki_R, cfg.Kd_R, integralR,
+                                              prevErrR, dFilterR);
+          int basePwmL = keepMotorRunningPwm(cfg.base_pwm + pidTrimL, cfg);
+          int basePwmR = keepMotorRunningPwm(cfg.base_pwm + pidTrimR, cfg);
+          float yawError = continuousYaw - target_yaw;
+          int gyroSteer =
+              constrain((int)(yawError * cfg.k_gyro), -driveSteerLimit(cfg),
+                        driveSteerLimit(cfg));
+          int totalSteer = constrain(gyroSteer + filteredIrSteer,
+                                     -driveSteerLimit(cfg),
+                                     driveSteerLimit(cfg));
+          debugTotalSteer = totalSteer;
+
+          int targetPwm_L =
+              keepMotorRunningPwm(basePwmL + totalSteer + cfg.wheel_trim_L, cfg);
+          int targetPwm_R =
+              keepMotorRunningPwm(basePwmR - totalSteer + cfg.wheel_trim_R, cfg);
+
+          targetPwm_L = constrain(targetPwm_L + boostPwmL, 0, cfg.Turn_Max);
+          targetPwm_R = constrain(targetPwm_R + boostPwmR, 0, cfg.Turn_Max);
+
+          int newPwm_L = applyRateLimit(targetPwm_L, pwmL, cfg.ramp_rate);
+          int newPwm_R = applyRateLimit(targetPwm_R, pwmR, cfg.ramp_rate);
+
+          setLeftMotor(newPwm_L);
+          setRightMotor(newPwm_R);
+          break;
+        }
+
+        case MAZE_RIGHT_HAND:
+        {
+          if (mazePhase == MAZE_DECIDE)
+          {
+            MazeWalls walls = readMazeWalls(rawIr, cfg);
+            debugSideErrorL = walls.left ? 1 : 0;
+            debugSideErrorR = walls.right ? 1 : 0;
+            debugSteerIR = walls.front ? 1 : 0;
+            debugTotalSteer = 0;
+            filteredIrSteer = 0;
+            brakeMotors();
+
+            if (!walls.right)
+            {
+              startMazeTurn(MAZE_TURN_RIGHT_DEG);
+            }
+            else if (!walls.front)
+            {
+              startMazeStraightRun();
+            }
+            else if (!walls.left)
+            {
+              startMazeTurn(MAZE_TURN_LEFT_DEG);
+            }
+            else
+            {
+              startMazeTurn(MAZE_TURN_BACK_DEG);
+            }
+            break;
+          }
+
+          if (mazePhase == MAZE_TURNING)
+          {
+            float yawTravel = fabsf(continuousYaw - mazeTurnStartYaw);
+            float yawRemaining = fabsf(mazeTurnDegrees) - yawTravel;
+            float turnTolerance = max(2.0f, cfg.Turn_Err);
+            debugTotalSteer = (int)yawRemaining;
+            debugSteerIR = 0;
+
+            if (yawRemaining <= turnTolerance)
+            {
+              filteredIrSteer = 0;
+              startMazeStraightRun();
+              break;
+            }
+
+            uint32_t turnTimeout =
+                (fabsf(mazeTurnDegrees) > 120.0f) ? MAZE_TURN_180_TIMEOUT_MS
+                                                   : MAZE_TURN_90_TIMEOUT_MS;
+            if (millis() - mazeTurnStartMs > turnTimeout)
+            {
+              changeState(IDLE);
+              break;
+            }
+
+            int turnPwm =
+                constrain(max(cfg.Turn_Min, cfg.base_pwm), 0, cfg.Turn_Max);
+            int targetPwm_L = (mazeTurnDegrees < 0.0f) ? turnPwm : -turnPwm;
+            int targetPwm_R = (mazeTurnDegrees < 0.0f) ? -turnPwm : turnPwm;
+            int newPwm_L = applyRateLimit(targetPwm_L, pwmL, cfg.ramp_rate);
+            int newPwm_R = applyRateLimit(targetPwm_R, pwmR, cfg.ramp_rate);
+            setLeftMotor(newPwm_L);
+            setRightMotor(newPwm_R);
+            break;
+          }
+
+          if (mazePhase == MAZE_BRAKE_AT_WALL)
+          {
+            int brakeRamp =
+                max(1, cfg.ramp_rate * FRONT_STOP_BRAKE_RAMP_MULTIPLIER);
+            int newPwm_L = applyRateLimit(0, pwmL, brakeRamp);
+            int newPwm_R = applyRateLimit(0, pwmR, brakeRamp);
+            setLeftMotor(newPwm_L);
+            setRightMotor(newPwm_R);
+
+            if (abs(newPwm_L) <= 3 && abs(newPwm_R) <= 3)
+            {
+              brakeMotors();
+              resetMotorsAndPID();
+              resetRunProfileAndPidMemory();
+              target_yaw = continuousYaw;
+              mazePhase = MAZE_DECIDE;
+            }
+            break;
+          }
+
+          MazeWalls walls = readMazeWalls(rawIr, cfg);
+          debugSideErrorL = walls.left ? 1 : 0;
+          debugSideErrorR = walls.right ? 1 : 0;
+          if (walls.front)
+          {
+            debugSteerIR = 1;
+            filteredIrSteer = 0;
+            mazePhase = MAZE_BRAKE_AT_WALL;
+            break;
+          }
+
+          PulseSnapshot pulses = getPulseSnapshot();
+          long currentPulseL = pulses.left;
+          long currentPulseR = pulses.right;
+          long travelL = absPulse(currentPulseL);
+          long travelR = absPulse(currentPulseR);
+          long travelAvg = (travelL + travelR) / 2;
 
           WallAvoidanceResult wallAvoidance =
               computeStraightWallAvoidance(ir, cfg);

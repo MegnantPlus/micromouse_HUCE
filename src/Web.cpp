@@ -237,6 +237,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     <div class="grid-btn">
       <button class="btn btn-run" onclick="fetch('/cmd?val=START')">CHAY LIEN TUC</button>
       <button class="btn btn-run" style="background:#27ae60;" onclick="fetch('/cmd?val=ONE_CELL')">DI THANG 1 O</button>
+      <button class="btn btn-run" style="background:#2980b9;" onclick="fetch('/cmd?val=MAZE_RIGHT')">GIAI ME CUNG PHAI</button>
       <button class="btn btn-stop" onclick="fetch('/cmd?val=STOP')">🛑 PHANH</button>
     </div>
   </div>
@@ -450,6 +451,9 @@ void handleCmd() {
       stateChangeRequested = true;
     } else if (command == "ONE_CELL") {
       requestedState = PID_RUN_ONE_CELL;
+      stateChangeRequested = true;
+    } else if (command == "MAZE_RIGHT") {
+      requestedState = MAZE_RIGHT_HAND;
       stateChangeRequested = true;
     } else if (command == "STOP") {
       requestedState = IDLE;
