@@ -25,7 +25,6 @@ const int FRONT_STOP_SENSOR_RIGHT = SENSOR_R;
 const int CONTROL_PERIOD_MS = 10;
 const float CONTROL_DT_SECONDS = CONTROL_PERIOD_MS / 1000.0f;
 const int SENSOR_DELTA_PWM_GAIN = 0;
-const int FRONT_STOP_EARLY_MARGIN = 800;
 const int FRONT_STOP_BRAKE_RAMP_MULTIPLIER = 3;
 const uint32_t MAIN_CONTROL_STACK_SIZE = 8192;
 const uint32_t CONTROL_TASK_WDT_TIMEOUT_SECONDS = 2;
@@ -34,9 +33,8 @@ const int IR_STEER_FILTER_KEEP = 4;
 const int IR_STEER_FILTER_TOTAL = 5;
 const float MAZE_TURN_RIGHT_DEG = -90.0f;
 const float MAZE_TURN_LEFT_DEG = 90.0f;
-const float MAZE_TURN_BACK_DEG = 180.0f;
 const uint32_t MAZE_TURN_90_TIMEOUT_MS = 1800;
-const uint32_t MAZE_TURN_180_TIMEOUT_MS = 3200;
+const uint32_t MAZE_POST_BACKUP_SETTLE_MS = 180;
 
 long lastSpeedPulseL = 0;
 long lastSpeedPulseR = 0;
@@ -48,9 +46,12 @@ int sideCloseDirection(int sensorIndex, int sideRef, const RuntimeParams &cfg);
 enum MazePhase
 {
   MAZE_DECIDE,
+  MAZE_SETTLE_AFTER_BACKUP,
+  MAZE_DECIDE_AFTER_BACKUP,
   MAZE_TURNING,
   MAZE_RUN_TO_WALL,
-  MAZE_BRAKE_AT_WALL
+  MAZE_BRAKE_AT_WALL,
+  MAZE_BACK_UP_AFTER_DEAD_END
 };
 
 struct MazeWalls
@@ -64,6 +65,7 @@ MazePhase mazePhase = MAZE_DECIDE;
 float mazeTurnStartYaw = 0.0f;
 float mazeTurnDegrees = 0.0f;
 uint32_t mazeTurnStartMs = 0;
+uint32_t mazeSettleStartMs = 0;
 
 long absPulse(long value)
 {
@@ -110,9 +112,9 @@ int frontCorrectionStart(int sensorIndex, const RuntimeParams &cfg)
 bool isFrontWallDetected(const IrSnapshot &ir, const RuntimeParams &cfg)
 {
   int leftThreshold = max(0, frontCorrectionStart(FRONT_STOP_SENSOR_LEFT, cfg) -
-                                 FRONT_STOP_EARLY_MARGIN);
+                                 cfg.front_stop_early_margin);
   int rightThreshold = max(0, frontCorrectionStart(FRONT_STOP_SENSOR_RIGHT, cfg) -
-                                  FRONT_STOP_EARLY_MARGIN);
+                                  cfg.front_stop_early_margin);
 
   bool frontLeftWarn = isSensorCalibrated(FRONT_STOP_SENSOR_LEFT, cfg) &&
                        sensorValueByIndex(ir, FRONT_STOP_SENSOR_LEFT) >
@@ -187,11 +189,54 @@ bool isMazeWallBySensor(int sensorIndex, const IrSnapshot &ir,
   return false;
 }
 
+bool isMazeFrontWallBySensor(int sensorIndex, const IrSnapshot &ir,
+                             const RuntimeParams &cfg)
+{
+  int value = sensorValueByIndex(ir, sensorIndex);
+  int deadband = constrain(cfg.ir_deadband / 4, 10, 60);
+
+  if (isMazeSensorWallCalibrated(sensorIndex, cfg))
+  {
+    int wallRef = constrain(max_IR[sensorIndex] + cfg.offset_upper, 0, 4095);
+    int emptyRef = constrain(min_IR[sensorIndex] - cfg.offset_lower, 0, 4095);
+    int diff = wallRef - emptyRef;
+    if (abs(diff) <= deadband)
+      return false;
+
+    int margin = constrain(cfg.front_stop_early_margin, 0, 4095);
+    int threshold = (diff > 0) ? (wallRef - margin) : (wallRef + margin);
+    threshold = constrain(threshold, min(wallRef, emptyRef),
+                          max(wallRef, emptyRef));
+    return (diff > 0) ? (value >= threshold) : (value <= threshold);
+  }
+
+  return isMazeWallBySensor(sensorIndex, ir, cfg);
+}
+
+bool isMazeSideOpenForTurn(int sensorIndex, const IrSnapshot &ir,
+                           const RuntimeParams &cfg)
+{
+  if (!isMazeSensorWallCalibrated(sensorIndex, cfg))
+    return false;
+
+  int value = sensorValueByIndex(ir, sensorIndex);
+  int wallRef = constrain(max_IR[sensorIndex] + cfg.offset_upper, 0, 4095);
+  int emptyRef = constrain(min_IR[sensorIndex] - cfg.offset_lower, 0, 4095);
+  int span = abs(wallRef - emptyRef);
+  int openDistance = max(span / 2, max(30, cfg.ir_deadband / 2));
+
+  if (span <= openDistance)
+    return false;
+
+  return (wallRef > emptyRef) ? (value <= wallRef - openDistance)
+                              : (value >= wallRef + openDistance);
+}
+
 MazeWalls readMazeWalls(const IrSnapshot &ir, const RuntimeParams &cfg)
 {
   MazeWalls walls = {};
-  walls.front = isMazeWallBySensor(SENSOR_L, ir, cfg) ||
-                isMazeWallBySensor(SENSOR_R, ir, cfg);
+  walls.front = isMazeFrontWallBySensor(SENSOR_L, ir, cfg) ||
+                isMazeFrontWallBySensor(SENSOR_R, ir, cfg);
   walls.left = isMazeWallBySensor(SENSOR_FL, ir, cfg);
   walls.right = isMazeWallBySensor(SENSOR_FR, ir, cfg);
 
@@ -204,6 +249,7 @@ void resetMazeRunner()
   mazeTurnStartYaw = continuousYaw;
   mazeTurnDegrees = 0.0f;
   mazeTurnStartMs = 0;
+  mazeSettleStartMs = 0;
   target_yaw = continuousYaw;
   isTurningTask = false;
 }
@@ -215,6 +261,25 @@ void startMazeTurn(float turnDegrees)
   mazeTurnStartYaw = continuousYaw;
   mazeTurnStartMs = millis();
   isTurningTask = true;
+}
+
+void startMazeDeadEndBackup()
+{
+  resetMotorsAndPID();
+  resetRunProfileAndPidMemory();
+  mazePhase = MAZE_BACK_UP_AFTER_DEAD_END;
+  isTurningTask = false;
+}
+
+void startMazePostBackupDecision()
+{
+  brakeMotors();
+  resetMotorsAndPID();
+  resetRunProfileAndPidMemory();
+  target_yaw = continuousYaw;
+  mazePhase = MAZE_SETTLE_AFTER_BACKUP;
+  mazeSettleStartMs = millis();
+  isTurningTask = false;
 }
 
 void startMazeStraightRun()
@@ -594,8 +659,11 @@ void mainControlTask(void *pvParameters)
             debugTotalSteer = 0;
             filteredIrSteer = 0;
             brakeMotors();
-
-            if (!walls.right)
+            if (!walls.left)
+            {
+              startMazeTurn(MAZE_TURN_LEFT_DEG);
+            }
+            else if (!walls.right)
             {
               startMazeTurn(MAZE_TURN_RIGHT_DEG);
             }
@@ -603,13 +671,51 @@ void mainControlTask(void *pvParameters)
             {
               startMazeStraightRun();
             }
-            else if (!walls.left)
+            else
+            {
+              startMazeDeadEndBackup();
+            }
+            break;
+          }
+
+          if (mazePhase == MAZE_SETTLE_AFTER_BACKUP)
+          {
+            brakeMotors();
+            debugSteerIR = 0;
+            debugTotalSteer =
+                (int)(MAZE_POST_BACKUP_SETTLE_MS -
+                      (millis() - mazeSettleStartMs));
+
+            if (millis() - mazeSettleStartMs >= MAZE_POST_BACKUP_SETTLE_MS)
+            {
+              mazePhase = MAZE_DECIDE_AFTER_BACKUP;
+            }
+            break;
+          }
+
+          if (mazePhase == MAZE_DECIDE_AFTER_BACKUP)
+          {
+            MazeWalls walls = readMazeWalls(rawIr, cfg);
+            bool rightOpen = isMazeSideOpenForTurn(SENSOR_FR, rawIr, cfg);
+            bool leftOpen = isMazeSideOpenForTurn(SENSOR_FL, rawIr, cfg);
+            debugSideErrorL = walls.left ? 1 : 0;
+            debugSideErrorR = walls.right ? 1 : 0;
+            debugSteerIR = walls.front ? 1 : 0;
+            debugTotalSteer = 0;
+            filteredIrSteer = 0;
+            brakeMotors();
+
+            if (leftOpen)
             {
               startMazeTurn(MAZE_TURN_LEFT_DEG);
             }
+            else if (rightOpen)
+            {
+              startMazeTurn(MAZE_TURN_RIGHT_DEG);
+            }
             else
             {
-              startMazeTurn(MAZE_TURN_BACK_DEG);
+              startMazeDeadEndBackup();
             }
             break;
           }
@@ -629,10 +735,7 @@ void mainControlTask(void *pvParameters)
               break;
             }
 
-            uint32_t turnTimeout =
-                (fabsf(mazeTurnDegrees) > 120.0f) ? MAZE_TURN_180_TIMEOUT_MS
-                                                   : MAZE_TURN_90_TIMEOUT_MS;
-            if (millis() - mazeTurnStartMs > turnTimeout)
+            if (millis() - mazeTurnStartMs > MAZE_TURN_90_TIMEOUT_MS)
             {
               changeState(IDLE);
               break;
@@ -666,6 +769,33 @@ void mainControlTask(void *pvParameters)
               target_yaw = continuousYaw;
               mazePhase = MAZE_DECIDE;
             }
+            break;
+          }
+
+          if (mazePhase == MAZE_BACK_UP_AFTER_DEAD_END)
+          {
+            PulseSnapshot pulses = getPulseSnapshot();
+            long travelAvg =
+                (absPulse(pulses.left) + absPulse(pulses.right)) / 2;
+
+            debugSteerIR = 0;
+            debugTotalSteer =
+                (int)(cfg.maze_dead_end_backup_pulses - travelAvg);
+
+            if (travelAvg >= cfg.maze_dead_end_backup_pulses)
+            {
+              startMazePostBackupDecision();
+              break;
+            }
+
+            int backupPwm =
+                constrain(cfg.maze_dead_end_backup_pwm, 0, cfg.Turn_Max);
+            int targetPwm_L = -backupPwm;
+            int targetPwm_R = -backupPwm;
+            int newPwm_L = applyRateLimit(targetPwm_L, pwmL, cfg.ramp_rate);
+            int newPwm_R = applyRateLimit(targetPwm_R, pwmR, cfg.ramp_rate);
+            setLeftMotor(newPwm_L);
+            setRightMotor(newPwm_R);
             break;
           }
 

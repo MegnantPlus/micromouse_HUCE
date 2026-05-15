@@ -40,6 +40,9 @@ void clampRuntimeParams() {
   offset_upper = max(0, offset_upper);
   offset_lower = max(0, offset_lower);
   pulses_per_cell = max(1, pulses_per_cell);
+  front_stop_early_margin = constrain(front_stop_early_margin, 0, 4095);
+  maze_dead_end_backup_pulses = constrain(maze_dead_end_backup_pulses, 0, 5000);
+  maze_dead_end_backup_pwm = constrain(maze_dead_end_backup_pwm, Turn_Min, Turn_Max);
   side_ref_L = constrain(side_ref_L, 0, 4095);
   side_ref_FL = constrain(side_ref_FL, 0, 4095);
   side_ref_FR = constrain(side_ref_FR, 0, 4095);
@@ -70,6 +73,9 @@ void loadRuntimeParams() {
   Turn_Min = settings.getInt("pwmMin", Turn_Min);
   Turn_Max = settings.getInt("pwmMax", Turn_Max);
   pulses_per_cell = settings.getInt("xungO", pulses_per_cell);
+  front_stop_early_margin = settings.getInt("frontMg", front_stop_early_margin);
+  maze_dead_end_backup_pulses = settings.getInt("deadBack", maze_dead_end_backup_pulses);
+  maze_dead_end_backup_pwm = settings.getInt("backPwm", maze_dead_end_backup_pwm);
   side_ref_L = settings.getInt("side7L", side_ref_L);
   side_ref_FL = settings.getInt("side7FL", side_ref_FL);
   side_ref_FR = settings.getInt("side7FR", side_ref_FR);
@@ -115,6 +121,9 @@ void saveRuntimeParams() {
   settings.putInt("pwmMin", Turn_Min);
   settings.putInt("pwmMax", Turn_Max);
   settings.putInt("xungO", pulses_per_cell);
+  settings.putInt("frontMg", front_stop_early_margin);
+  settings.putInt("deadBack", maze_dead_end_backup_pulses);
+  settings.putInt("backPwm", maze_dead_end_backup_pwm);
   settings.putInt("side7L", side_ref_L);
   settings.putInt("side7FL", side_ref_FL);
   settings.putInt("side7FR", side_ref_FR);
@@ -216,6 +225,9 @@ const char index_html[] PROGMEM = R"rawliteral(
         <label>PWM Min <input type="number" id="pwm_min" step="1" value="35"></label>
         <label>PWM Max <input type="number" id="pwm_max" step="1" value="100"></label>
         <label>Xung/20cm <input type="number" id="xung_o" step="1" value="980"></label>
+        <label>Front Margin <input type="number" id="front_margin" step="1" value="800"></label>
+        <label>Lui Ngo Cut <input type="number" id="dead_back" step="1" value="980"></label>
+        <label>PWM Lui <input type="number" id="backup_pwm" step="1" value="55"></label>
       </div>
     </div>
     
@@ -259,7 +271,8 @@ const char index_html[] PROGMEM = R"rawliteral(
     kdR: 'kd_r', accel: 'accel', vmax: 'vmax', vmin: 'vmin',
     ramp: 'ramp', gyro: 'gyro', irGain: 'ir_gain', wallMax: 'wall_steer',
     trimL: 'trim_l', trimR: 'trim_r', pwmMin: 'pwm_min', pwmMax: 'pwm_max',
-    xungO: 'xung_o'
+    xungO: 'xung_o', frontMargin: 'front_margin', deadBack: 'dead_back',
+    backupPwm: 'backup_pwm'
   };
   function resizeCanvas() { canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight; }
   window.addEventListener('resize', resizeCanvas); setTimeout(resizeCanvas, 100);
@@ -328,7 +341,10 @@ const char index_html[] PROGMEM = R"rawliteral(
       "trimR=" + val('trim_r'),
       "pwmMin=" + val('pwm_min'),
       "pwmMax=" + val('pwm_max'),
-      "xungO=" + val('xung_o')
+      "xungO=" + val('xung_o'),
+      "frontMargin=" + val('front_margin'),
+      "deadBack=" + val('dead_back'),
+      "backupPwm=" + val('backup_pwm')
     ].join("&");
     fetch('/set?' + q)
       .then(r => r.text())
@@ -407,6 +423,9 @@ void handleSet() {
   if (server.hasArg("pwmMin")) Turn_Min = server.arg("pwmMin").toInt();
   if (server.hasArg("pwmMax")) Turn_Max = server.arg("pwmMax").toInt();
   if (server.hasArg("xungO")) pulses_per_cell = server.arg("xungO").toInt();
+  if (server.hasArg("frontMargin")) front_stop_early_margin = server.arg("frontMargin").toInt();
+  if (server.hasArg("deadBack")) maze_dead_end_backup_pulses = server.arg("deadBack").toInt();
+  if (server.hasArg("backupPwm")) maze_dead_end_backup_pwm = server.arg("backupPwm").toInt();
   saveRuntimeParams();
   server.send(200, "text/plain", "OK");
 }
@@ -471,7 +490,7 @@ void handleCmd() {
 
 void handleData() {
   IrSnapshot liveIr = latestRawIrSnapshot();
-  char jsonBuf[1400];
+  char jsonBuf[1550];
   snprintf(jsonBuf, sizeof(jsonBuf),
            "{\"irL\":%d,\"irFL\":%d,\"irFR\":%d,\"irR\":%d,"
            "\"dL\":%d,\"dFL\":%d,\"dFR\":%d,\"dR\":%d,"
@@ -487,7 +506,8 @@ void handleData() {
            "\"ramp\":%d,\"gyro\":%.1f,\"irGain\":%.2f,"
            "\"wallMax\":%d,\"trimL\":%d,\"trimR\":%d,"
            "\"pwmMin\":%d,\"pwmMax\":%d,"
-           "\"xungO\":%d}",
+           "\"xungO\":%d,\"frontMargin\":%d,\"deadBack\":%d,"
+           "\"backupPwm\":%d}",
            liveIr.left, liveIr.frontLeft, liveIr.frontRight, liveIr.right,
            liveIr.left - min_IR[SIDX(S_L)],
            liveIr.frontLeft - min_IR[SIDX(S_FL)],
@@ -500,7 +520,8 @@ void handleData() {
            ir_deadband, base_pwm, Kp_L, Ki_L, Kd_L, Kp_R, Ki_R, Kd_R,
            accel_rate, max_vel, min_vel, ramp_rate, k_gyro, k_ir,
            wall_steer_limit, wheel_trim_L, wheel_trim_R, Turn_Min, Turn_Max,
-           pulses_per_cell);
+           pulses_per_cell, front_stop_early_margin,
+           maze_dead_end_backup_pulses, maze_dead_end_backup_pwm);
   server.send(200, "application/json", jsonBuf);
 }
 
