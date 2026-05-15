@@ -33,7 +33,9 @@ const int IR_STEER_FILTER_KEEP = 4;
 const int IR_STEER_FILTER_TOTAL = 5;
 const float MAZE_TURN_RIGHT_DEG = -90.0f;
 const float MAZE_TURN_LEFT_DEG = 90.0f;
+const float MAZE_TURN_BACK_DEG = 180.0f;
 const uint32_t MAZE_TURN_90_TIMEOUT_MS = 1800;
+const uint32_t MAZE_TURN_180_TIMEOUT_MS = 3200;
 const uint32_t MAZE_POST_BACKUP_SETTLE_MS = 180;
 
 long lastSpeedPulseL = 0;
@@ -673,7 +675,7 @@ void mainControlTask(void *pvParameters)
             }
             else
             {
-              startMazeDeadEndBackup();
+              startMazeTurn(MAZE_TURN_BACK_DEG);
             }
             break;
           }
@@ -715,7 +717,7 @@ void mainControlTask(void *pvParameters)
             }
             else
             {
-              startMazeDeadEndBackup();
+              startMazeTurn(MAZE_TURN_BACK_DEG);
             }
             break;
           }
@@ -735,7 +737,10 @@ void mainControlTask(void *pvParameters)
               break;
             }
 
-            if (millis() - mazeTurnStartMs > MAZE_TURN_90_TIMEOUT_MS)
+            uint32_t turnTimeout =
+                (fabsf(mazeTurnDegrees) > 120.0f) ? MAZE_TURN_180_TIMEOUT_MS
+                                                   : MAZE_TURN_90_TIMEOUT_MS;
+            if (millis() - mazeTurnStartMs > turnTimeout)
             {
               changeState(IDLE);
               break;
