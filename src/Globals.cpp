@@ -31,6 +31,9 @@ void copyRuntimeParamsFromGlobals(RuntimeParams &params) {
   params.front_stop_early_margin = front_stop_early_margin;
   params.maze_dead_end_backup_pulses = maze_dead_end_backup_pulses;
   params.maze_dead_end_backup_pwm = maze_dead_end_backup_pwm;
+  params.maze_turn_late_pulses = maze_turn_late_pulses;
+  params.maze_turn_angle_deg = maze_turn_angle_deg;
+  params.point_turn_backup_pulses = point_turn_backup_pulses;
   params.side_ref_L = side_ref_L;
   params.side_ref_FL = side_ref_FL;
   params.side_ref_FR = side_ref_FR;
@@ -67,6 +70,9 @@ void copyRuntimeParamsToGlobals(const RuntimeParams &params) {
   front_stop_early_margin = params.front_stop_early_margin;
   maze_dead_end_backup_pulses = params.maze_dead_end_backup_pulses;
   maze_dead_end_backup_pwm = params.maze_dead_end_backup_pwm;
+  maze_turn_late_pulses = params.maze_turn_late_pulses;
+  maze_turn_angle_deg = params.maze_turn_angle_deg;
+  point_turn_backup_pulses = params.point_turn_backup_pulses;
   side_ref_L = params.side_ref_L;
   side_ref_FL = params.side_ref_FL;
   side_ref_FR = params.side_ref_FR;
@@ -118,6 +124,9 @@ int pulses_per_cell = 980;
 int front_stop_early_margin = 800;
 int maze_dead_end_backup_pulses = 980;
 int maze_dead_end_backup_pwm = 55;
+int maze_turn_late_pulses = 120;
+float maze_turn_angle_deg = 78.0f;
+int point_turn_backup_pulses = 80;
 int side_ref_L = 4095;
 int side_ref_FL = 4095;
 int side_ref_FR = 4095;
@@ -193,5 +202,13 @@ Adafruit_NeoPixel pixels(NUMPIXELS, LED_PIN, NEO_GRB + NEO_KHZ800);
 
 volatile float continuousYaw = 0.0;
 float target_yaw = 0.0;
+volatile float debugGyroZRawDps = 0.0f;
+volatile float debugGyroZCorrectedDps = 0.0f;
+volatile float debugGyroZBiasDps = 0.0f;
+volatile float debugMpuTempC = 0.0f;
+volatile float debugYawDriftDpm = 0.0f;
+volatile int debugGyroZAutoBiasActive = 0;
+volatile uint32_t debugGyroZAutoBiasStillMs = 0;
+volatile int debugGyroZAutoBiasReason = 1;
 
 SemaphoreHandle_t i2cMutex = NULL;

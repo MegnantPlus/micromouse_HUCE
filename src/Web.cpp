@@ -1,5 +1,6 @@
 #include "Web.h"
 #include "Globals.h"
+#include "IMU.h"
 #include <DNSServer.h>
 #include <Preferences.h>
 #include <WebServer.h>
@@ -43,6 +44,9 @@ void clampRuntimeParams() {
   front_stop_early_margin = constrain(front_stop_early_margin, 0, 4095);
   maze_dead_end_backup_pulses = constrain(maze_dead_end_backup_pulses, 0, 5000);
   maze_dead_end_backup_pwm = constrain(maze_dead_end_backup_pwm, Turn_Min, Turn_Max);
+  maze_turn_late_pulses = constrain(maze_turn_late_pulses, 0, 5000);
+  maze_turn_angle_deg = constrain(maze_turn_angle_deg, 45.0f, 90.0f);
+  point_turn_backup_pulses = constrain(point_turn_backup_pulses, 0, 5000);
   side_ref_L = constrain(side_ref_L, 0, 4095);
   side_ref_FL = constrain(side_ref_FL, 0, 4095);
   side_ref_FR = constrain(side_ref_FR, 0, 4095);
@@ -76,6 +80,9 @@ void loadRuntimeParams() {
   front_stop_early_margin = settings.getInt("frontMg", front_stop_early_margin);
   maze_dead_end_backup_pulses = settings.getInt("deadBack", maze_dead_end_backup_pulses);
   maze_dead_end_backup_pwm = settings.getInt("backPwm", maze_dead_end_backup_pwm);
+  maze_turn_late_pulses = settings.getInt("turnLate", maze_turn_late_pulses);
+  maze_turn_angle_deg = settings.getFloat("turnDeg", maze_turn_angle_deg);
+  point_turn_backup_pulses = settings.getInt("turnBack", point_turn_backup_pulses);
   side_ref_L = settings.getInt("side7L", side_ref_L);
   side_ref_FL = settings.getInt("side7FL", side_ref_FL);
   side_ref_FR = settings.getInt("side7FR", side_ref_FR);
@@ -124,6 +131,9 @@ void saveRuntimeParams() {
   settings.putInt("frontMg", front_stop_early_margin);
   settings.putInt("deadBack", maze_dead_end_backup_pulses);
   settings.putInt("backPwm", maze_dead_end_backup_pwm);
+  settings.putInt("turnLate", maze_turn_late_pulses);
+  settings.putFloat("turnDeg", maze_turn_angle_deg);
+  settings.putInt("turnBack", point_turn_backup_pulses);
   settings.putInt("side7L", side_ref_L);
   settings.putInt("side7FL", side_ref_FL);
   settings.putInt("side7FR", side_ref_FR);
@@ -189,6 +199,22 @@ const char index_html[] PROGMEM = R"rawliteral(
           <div class="val-item">FR: <span id="r_fr" class="raw">0</span> / <span id="d_fr" class="delta">0</span></div>
           <div class="val-item">R: <span id="r_r" class="raw">0</span> / <span id="d_r" class="delta">0</span></div>
         </div>
+        <h4>MPU GOC</h4>
+        <div class="val-box">
+          <div class="val-item">Yaw: <span id="yaw" class="raw">0.00</span></div>
+          <div class="val-item">Target: <span id="target_yaw" class="raw">0.00</span></div>
+          <div class="val-item">Err: <span id="yaw_err" class="delta">0.00</span></div>
+          <div class="val-item">Steer: <span id="total_steer" class="delta">0</span></div>
+          <div class="val-item">GyroZ Raw: <span id="gyro_z_raw" class="raw">0.000</span></div>
+          <div class="val-item">GyroZ Corr: <span id="gyro_z_corr" class="raw">0.000</span></div>
+          <div class="val-item">BiasZ: <span id="gyro_z_bias" class="delta">0.000</span></div>
+          <div class="val-item">Drift/min: <span id="yaw_drift" class="delta">0.00</span></div>
+          <div class="val-item">Temp C: <span id="mpu_temp" class="raw">0.0</span></div>
+          <div class="val-item">AutoBias: <span id="auto_bias" class="raw">OFF</span></div>
+          <div class="val-item">Still ms: <span id="auto_bias_ms" class="raw">0</span></div>
+          <div class="val-item">AB Reason: <span id="auto_bias_reason" class="delta">WAIT</span></div>
+        </div>
+        <button class="btn" style="background:#2c3e50;" onclick="rezeroMpu()">REZERO MPU</button>
       </div>
     </div>
 
@@ -226,6 +252,9 @@ const char index_html[] PROGMEM = R"rawliteral(
         <label>PWM Max <input type="number" id="pwm_max" step="1" value="100"></label>
         <label>Xung/20cm <input type="number" id="xung_o" step="1" value="980"></label>
         <label>Front Margin <input type="number" id="front_margin" step="1" value="800"></label>
+        <label>Tre Re <input type="number" id="turn_late" step="1" value="120"></label>
+        <label>Goc Re <input type="number" id="turn_deg" step="1" value="78"></label>
+        <label>Lui Sau Re <input type="number" id="turn_back" step="1" value="80"></label>
         <label>Lui Ngo Cut <input type="number" id="dead_back" step="1" value="980"></label>
         <label>PWM Lui <input type="number" id="backup_pwm" step="1" value="55"></label>
       </div>
@@ -239,17 +268,24 @@ const char index_html[] PROGMEM = R"rawliteral(
       <button class="btn" style="background:#16a085;" onclick="calib('SideL7').then(r=>r.text())">SET TUONG TRAI</button>
       <button class="btn" style="background:#16a085;" onclick="calib('SideR7').then(r=>r.text())">SET TUONG PHAI</button>
     </div>
+    <button class="btn" style="background:#1abc9c;" onclick="calib('Center').then(r=>r.text())">SET GIUA O</button>
     <button class="btn btn-save" onclick="saveAll()">💾 LƯU THÔNG SỐ BĂM XUNG</button>
     
     <div class="grid-2">
       <button class="btn" style="background:#8e44ad;" onclick="fetch('/cmd?val=TEST_L').then(r=>r.text())">TEST MOTOR TRAI</button>
       <button class="btn" style="background:#d35400;" onclick="fetch('/cmd?val=TEST_R').then(r=>r.text())">TEST MOTOR PHAI</button>
     </div>
+    <div class="grid-2">
+      <button class="btn" style="background:#6c3483;" onclick="fetch('/cmd?val=TEST_TURN_L').then(r=>r.text())">TEST QUAY TRAI</button>
+      <button class="btn" style="background:#ba4a00;" onclick="fetch('/cmd?val=TEST_TURN_R').then(r=>r.text())">TEST QUAY PHAI</button>
+    </div>
+    <button class="btn" style="background:#7f8c8d;" onclick="fetch('/cmd?val=BACK_ONE_CELL').then(r=>r.text())">LUI 1 O</button>
 
     <div class="grid-btn">
       <button class="btn btn-run" onclick="fetch('/cmd?val=START')">CHAY LIEN TUC</button>
       <button class="btn btn-run" style="background:#27ae60;" onclick="fetch('/cmd?val=ONE_CELL')">DI THANG 1 O</button>
       <button class="btn btn-run" style="background:#2980b9;" onclick="fetch('/cmd?val=MAZE_RIGHT')">GIAI ME CUNG PHAI</button>
+      <button class="btn btn-run" style="background:#2471a3;" onclick="fetch('/cmd?val=MAZE_RIGHT_CELL')">GIAI TUNG O PHAI</button>
       <button class="btn btn-stop" onclick="fetch('/cmd?val=STOP')">🛑 PHANH</button>
     </div>
   </div>
@@ -272,7 +308,8 @@ const char index_html[] PROGMEM = R"rawliteral(
     ramp: 'ramp', gyro: 'gyro', irGain: 'ir_gain', wallMax: 'wall_steer',
     trimL: 'trim_l', trimR: 'trim_r', pwmMin: 'pwm_min', pwmMax: 'pwm_max',
     xungO: 'xung_o', frontMargin: 'front_margin', deadBack: 'dead_back',
-    backupPwm: 'backup_pwm'
+    backupPwm: 'backup_pwm', turnLate: 'turn_late', turnDeg: 'turn_deg',
+    turnBack: 'turn_back'
   };
   function resizeCanvas() { canvas.width = canvas.clientWidth; canvas.height = canvas.clientHeight; }
   window.addEventListener('resize', resizeCanvas); setTimeout(resizeCanvas, 100);
@@ -343,6 +380,9 @@ const char index_html[] PROGMEM = R"rawliteral(
       "pwmMax=" + val('pwm_max'),
       "xungO=" + val('xung_o'),
       "frontMargin=" + val('front_margin'),
+      "turnLate=" + val('turn_late'),
+      "turnDeg=" + val('turn_deg'),
+      "turnBack=" + val('turn_back'),
       "deadBack=" + val('dead_back'),
       "backupPwm=" + val('backup_pwm')
     ].join("&");
@@ -361,6 +401,13 @@ const char index_html[] PROGMEM = R"rawliteral(
         return response;
       })
       .catch(err => alert("❌ Lỗi rớt mạng WiFi!"));
+  }
+
+  function rezeroMpu() {
+    document.getElementById('console').innerHTML = 'Rezero MPU... keep robot still';
+    return fetch('/imuRezero')
+      .then(response => response.text().then(text => { alert(text); return response; }))
+      .catch(err => alert("MPU rezero failed"));
   }
 
   let isPaused = false;
@@ -382,12 +429,25 @@ const char index_html[] PROGMEM = R"rawliteral(
           document.getElementById('r_fl').innerText = d.irFL; document.getElementById('d_fl').innerText = d.dFL;
           document.getElementById('r_fr').innerText = d.irFR; document.getElementById('d_fr').innerText = d.dFR;
           document.getElementById('r_r').innerText = d.irR; document.getElementById('d_r').innerText = d.dR;
+          document.getElementById('yaw').innerText = d.yaw.toFixed(2);
+          document.getElementById('target_yaw').innerText = d.targetYaw.toFixed(2);
+          document.getElementById('yaw_err').innerText = d.yawErr.toFixed(2);
+          document.getElementById('total_steer').innerText = d.totalSteer;
+          document.getElementById('gyro_z_raw').innerText = d.gyroZRaw.toFixed(3);
+          document.getElementById('gyro_z_corr').innerText = d.gyroZCorr.toFixed(3);
+          document.getElementById('gyro_z_bias').innerText = d.gyroZBias.toFixed(3);
+          document.getElementById('yaw_drift').innerText = d.yawDriftDpm.toFixed(2);
+          document.getElementById('mpu_temp').innerText = d.mpuTemp.toFixed(1);
+          document.getElementById('auto_bias').innerText = d.autoBias ? 'ON' : 'OFF';
+          document.getElementById('auto_bias_ms').innerText = d.autoBiasMs;
+          const abReasons = ['ON', 'WAIT', 'STATE', 'PWM', 'ENC', 'GYRO'];
+          document.getElementById('auto_bias_reason').innerText = abReasons[d.autoBiasReason] || 'UNKNOWN';
 
           let spdL = lastViewEncL === null ? 0 : Math.abs(d.encL - lastViewEncL);
           let spdR = lastViewEncR === null ? 0 : Math.abs(d.encR - lastViewEncR);
           lastViewEncL = d.encL; lastViewEncR = d.encR;
 
-          document.getElementById('console').innerHTML = `<span style="color:#c0392b; font-weight:bold;">ENC_L:</span> ${d.encL} | <span style="color:#2c3e50; font-weight:bold;">ENC_R:</span> ${d.encR} | SPD: ${spdL}/${spdR} | PWM: ${d.pwmL}/${d.pwmR} | SIDE: FL ${d.irFL}/${d.sideFL} e${d.errFL} - FR ${d.irFR}/${d.sideFR} e${d.errFR} | STEER: ${d.steerIR}/${d.totalSteer} | STATE: ${d.state}`;
+          document.getElementById('console').innerHTML = `<span style="color:#c0392b; font-weight:bold;">ENC_L:</span> ${d.encL} | <span style="color:#2c3e50; font-weight:bold;">ENC_R:</span> ${d.encR} | SPD: ${spdL}/${spdR} | PWM: ${d.pwmL}/${d.pwmR} | YAW: ${d.yaw.toFixed(2)} / ${d.targetYaw.toFixed(2)} e${d.yawErr.toFixed(2)} | GZ: ${d.gyroZCorr.toFixed(3)} dps (${d.yawDriftDpm.toFixed(1)} dpm) | SIDE: FL ${d.irFL}/${d.sideFL} e${d.errFL} - FR ${d.irFR}/${d.sideFR} e${d.errFR} | STEER: ${d.steerIR}/${d.totalSteer} | STATE: ${d.state}`;
           
           setTimeout(fetchLoop, 100); 
         }).catch(e => { setTimeout(fetchLoop, 500); });
@@ -424,6 +484,9 @@ void handleSet() {
   if (server.hasArg("pwmMax")) Turn_Max = server.arg("pwmMax").toInt();
   if (server.hasArg("xungO")) pulses_per_cell = server.arg("xungO").toInt();
   if (server.hasArg("frontMargin")) front_stop_early_margin = server.arg("frontMargin").toInt();
+  if (server.hasArg("turnLate")) maze_turn_late_pulses = server.arg("turnLate").toInt();
+  if (server.hasArg("turnDeg")) maze_turn_angle_deg = server.arg("turnDeg").toFloat();
+  if (server.hasArg("turnBack")) point_turn_backup_pulses = server.arg("turnBack").toInt();
   if (server.hasArg("deadBack")) maze_dead_end_backup_pulses = server.arg("deadBack").toInt();
   if (server.hasArg("backupPwm")) maze_dead_end_backup_pwm = server.arg("backupPwm").toInt();
   saveRuntimeParams();
@@ -462,6 +525,14 @@ void handleCalibSideR7() {
   server.send(200, "text/plain", "Da chot moc tuong phai!");
 }
 
+void handleCalibCenter() {
+  IrSnapshot liveIr = latestRawIrSnapshot();
+  side_ref_FL = constrain(liveIr.frontLeft, 0, 4095);
+  side_ref_FR = constrain(liveIr.frontRight, 0, 4095);
+  saveRuntimeParams();
+  server.send(200, "text/plain", "Da chot moc giua o!");
+}
+
 void handleCmd() {
   if (server.hasArg("val")) {
     String command = server.arg("val");
@@ -474,6 +545,9 @@ void handleCmd() {
     } else if (command == "MAZE_RIGHT") {
       requestedState = MAZE_RIGHT_HAND;
       stateChangeRequested = true;
+    } else if (command == "MAZE_RIGHT_CELL") {
+      requestedState = MAZE_RIGHT_HAND_CELL;
+      stateChangeRequested = true;
     } else if (command == "STOP") {
       requestedState = IDLE;
       stateChangeRequested = true;
@@ -483,19 +557,56 @@ void handleCmd() {
     } else if (command == "TEST_R") {
       requestedState = TEST_R;
       stateChangeRequested = true;
+    } else if (command == "TEST_TURN_L") {
+      requestedState = TEST_TURN_L;
+      stateChangeRequested = true;
+    } else if (command == "TEST_TURN_R") {
+      requestedState = TEST_TURN_R;
+      stateChangeRequested = true;
+    } else if (command == "BACK_ONE_CELL") {
+      requestedState = TEST_BACK_ONE_CELL;
+      stateChangeRequested = true;
     }
   }
   server.send(200, "text/plain", "OK");
 }
 
+void handleImuRezero() {
+  requestedState = IDLE;
+  stateChangeRequested = true;
+  delay(80);
+
+  bool ok = rezeroIMU(1500);
+  if (ok) {
+    server.send(200, "text/plain", "MPU rezero OK. Keep robot still for AutoBias.");
+  } else {
+    server.send(409, "text/plain", "MPU rezero is already running.");
+  }
+}
+
 void handleData() {
   IrSnapshot liveIr = latestRawIrSnapshot();
-  char jsonBuf[1550];
+  float liveYaw = continuousYaw;
+  float liveTargetYaw = target_yaw;
+  float liveYawErr = liveYaw - liveTargetYaw;
+  float liveGyroZRaw = debugGyroZRawDps;
+  float liveGyroZCorr = debugGyroZCorrectedDps;
+  float liveGyroZBias = debugGyroZBiasDps;
+  float liveMpuTemp = debugMpuTempC;
+  float liveYawDriftDpm = debugYawDriftDpm;
+  int liveAutoBias = debugGyroZAutoBiasActive;
+  uint32_t liveAutoBiasMs = debugGyroZAutoBiasStillMs;
+  int liveAutoBiasReason = debugGyroZAutoBiasReason;
+  char jsonBuf[2300];
   snprintf(jsonBuf, sizeof(jsonBuf),
            "{\"irL\":%d,\"irFL\":%d,\"irFR\":%d,\"irR\":%d,"
            "\"dL\":%d,\"dFL\":%d,\"dFR\":%d,\"dR\":%d,"
            "\"encL\":%ld,\"encR\":%ld,"
            "\"pwmL\":%d,\"pwmR\":%d,\"state\":%d,"
+           "\"yaw\":%.2f,\"targetYaw\":%.2f,\"yawErr\":%.2f,"
+           "\"gyroZRaw\":%.3f,\"gyroZCorr\":%.3f,\"gyroZBias\":%.3f,"
+           "\"mpuTemp\":%.2f,\"yawDriftDpm\":%.2f,"
+           "\"autoBias\":%d,\"autoBiasMs\":%lu,\"autoBiasReason\":%d,"
            "\"maxFL\":%d,\"maxFR\":%d,"
            "\"sideL\":%d,\"sideFL\":%d,\"sideFR\":%d,\"sideR\":%d,"
            "\"errFL\":%d,\"errFR\":%d,\"steerIR\":%d,\"totalSteer\":%d,"
@@ -506,22 +617,30 @@ void handleData() {
            "\"ramp\":%d,\"gyro\":%.1f,\"irGain\":%.2f,"
            "\"wallMax\":%d,\"trimL\":%d,\"trimR\":%d,"
            "\"pwmMin\":%d,\"pwmMax\":%d,"
-           "\"xungO\":%d,\"frontMargin\":%d,\"deadBack\":%d,"
+           "\"xungO\":%d,\"frontMargin\":%d,\"turnLate\":%d,\"turnDeg\":%.1f,"
+           "\"turnBack\":%d,"
+           "\"deadBack\":%d,"
            "\"backupPwm\":%d}",
            liveIr.left, liveIr.frontLeft, liveIr.frontRight, liveIr.right,
            liveIr.left - min_IR[SIDX(S_L)],
            liveIr.frontLeft - min_IR[SIDX(S_FL)],
            liveIr.frontRight - min_IR[SIDX(S_FR)],
            liveIr.right - min_IR[SIDX(S_R)], pulseL, pulseR, pwmL, pwmR,
-           (int)carState, max_IR[SIDX(S_FL)], max_IR[SIDX(S_FR)],
+           (int)carState, liveYaw, liveTargetYaw, liveYawErr,
+           liveGyroZRaw, liveGyroZCorr, liveGyroZBias, liveMpuTemp,
+           liveYawDriftDpm, liveAutoBias, (unsigned long)liveAutoBiasMs,
+           liveAutoBiasReason,
+           max_IR[SIDX(S_FL)], max_IR[SIDX(S_FR)],
            side_ref_L, side_ref_FL, side_ref_FR, side_ref_R,
            debugSideErrorL, debugSideErrorR, debugSteerIR, debugTotalSteer,
            offset_upper, offset_lower,
            ir_deadband, base_pwm, Kp_L, Ki_L, Kd_L, Kp_R, Ki_R, Kd_R,
            accel_rate, max_vel, min_vel, ramp_rate, k_gyro, k_ir,
            wall_steer_limit, wheel_trim_L, wheel_trim_R, Turn_Min, Turn_Max,
-           pulses_per_cell, front_stop_early_margin,
-           maze_dead_end_backup_pulses, maze_dead_end_backup_pwm);
+           pulses_per_cell, front_stop_early_margin, maze_turn_late_pulses,
+           maze_turn_angle_deg, point_turn_backup_pulses,
+           maze_dead_end_backup_pulses,
+           maze_dead_end_backup_pwm);
   server.send(200, "application/json", jsonBuf);
 }
 
@@ -546,7 +665,9 @@ void setupWebServer() {
   server.on("/calibLow", handleCalibLow);
   server.on("/calibSideL7", handleCalibSideL7);
   server.on("/calibSideR7", handleCalibSideR7);
+  server.on("/calibCenter", handleCalibCenter);
   server.on("/cmd", handleCmd);
+  server.on("/imuRezero", handleImuRezero);
   server.on("/data", handleData);
 
   server.onNotFound([]() {

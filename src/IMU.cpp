@@ -2,6 +2,7 @@
 #include "Config.h"
 #include "Globals.h"
 #include <Wire.h>
+#include <math.h>
 
 const uint8_t MPU_ADDR = 0x68;
 float GyroErrorX = 0, GyroErrorY = 0, GyroErrorZ = 0;
@@ -12,6 +13,90 @@ int rotations = 0;
 #define twoKi (0.0f)
 float q0 = 1.0f, q1 = 0.0f, q2 = 0.0f, q3 = 0.0f;
 float integralFBx = 0.0f, integralFBy = 0.0f, integralFBz = 0.0f;
+volatile bool imuRezeroActive = false;
+
+const uint32_t GYRO_Z_AUTO_BIAS_STILL_MS = 1200;
+const float GYRO_Z_AUTO_BIAS_MAX_STILL_DPS = 1.0f;
+const float GYRO_Z_AUTO_BIAS_ALPHA = 0.01f;
+const float GYRO_Z_AUTO_BIAS_MAX_STEP_DPS = 0.003f;
+const long GYRO_Z_AUTO_BIAS_MAX_ENCODER_DELTA = 2;
+long autoBiasStartPulseL = 0;
+long autoBiasStartPulseR = 0;
+uint32_t autoBiasStillStartMs = 0;
+
+int16_t readMpuWord() {
+  int high = Wire.read();
+  int low = Wire.read();
+  return (int16_t)((high << 8) | low);
+}
+
+void updateGyroZAutoBias(float gyroZRawDps) {
+  uint32_t nowMs = millis();
+  long currentPulseL = pulseL;
+  long currentPulseR = pulseR;
+  bool idleState = carState == IDLE && !isRunning && !isTurningTask;
+  bool motorsStopped = pwmL == 0 && pwmR == 0;
+  float biasError = gyroZRawDps - GyroErrorZ;
+  bool gyroLooksStill = fabsf(biasError) <= GYRO_Z_AUTO_BIAS_MAX_STILL_DPS;
+
+  if (!idleState) {
+    autoBiasStillStartMs = 0;
+    debugGyroZAutoBiasStillMs = 0;
+    debugGyroZAutoBiasActive = 0;
+    debugGyroZAutoBiasReason = 2;
+    return;
+  }
+
+  if (!motorsStopped) {
+    autoBiasStillStartMs = 0;
+    debugGyroZAutoBiasStillMs = 0;
+    debugGyroZAutoBiasActive = 0;
+    debugGyroZAutoBiasReason = 3;
+    return;
+  }
+
+  if (!gyroLooksStill) {
+    autoBiasStillStartMs = 0;
+    debugGyroZAutoBiasStillMs = 0;
+    debugGyroZAutoBiasActive = 0;
+    debugGyroZAutoBiasReason = 5;
+    return;
+  }
+
+  if (autoBiasStillStartMs == 0) {
+      autoBiasStillStartMs = nowMs;
+    autoBiasStartPulseL = currentPulseL;
+    autoBiasStartPulseR = currentPulseR;
+  }
+
+  bool encodersStill =
+      labs(currentPulseL - autoBiasStartPulseL) <=
+          GYRO_Z_AUTO_BIAS_MAX_ENCODER_DELTA &&
+      labs(currentPulseR - autoBiasStartPulseR) <=
+          GYRO_Z_AUTO_BIAS_MAX_ENCODER_DELTA;
+
+  if (!encodersStill) {
+    autoBiasStillStartMs = 0;
+    debugGyroZAutoBiasStillMs = 0;
+    debugGyroZAutoBiasActive = 0;
+    debugGyroZAutoBiasReason = 4;
+    return;
+  }
+
+  debugGyroZAutoBiasStillMs = nowMs - autoBiasStillStartMs;
+
+  if (debugGyroZAutoBiasStillMs >= GYRO_Z_AUTO_BIAS_STILL_MS) {
+    float step = constrain(biasError * GYRO_Z_AUTO_BIAS_ALPHA,
+                           -GYRO_Z_AUTO_BIAS_MAX_STEP_DPS,
+                           GYRO_Z_AUTO_BIAS_MAX_STEP_DPS);
+    GyroErrorZ += step;
+    debugGyroZAutoBiasActive = 1;
+    debugGyroZAutoBiasReason = 0;
+  } else {
+    debugGyroZAutoBiasActive = 0;
+    debugGyroZAutoBiasReason = 1;
+  }
+}
 
 void writeRegister(uint8_t reg, uint8_t data) {
   if (i2cMutex != NULL) xSemaphoreTake(i2cMutex, portMAX_DELAY);
@@ -84,9 +169,9 @@ void calibrateMPU(int duration_ms) {
     Wire.write(0x43);
     Wire.endTransmission(false);
     Wire.requestFrom((uint16_t)MPU_ADDR, (size_t)6, true);
-    sum_gx += (float)(Wire.read() << 8 | Wire.read()) / 65.5f;
-    sum_gy += (float)(Wire.read() << 8 | Wire.read()) / 65.5f;
-    sum_gz += (float)(Wire.read() << 8 | Wire.read()) / 65.5f;
+    sum_gx += (float)readMpuWord() / 65.5f;
+    sum_gy += (float)readMpuWord() / 65.5f;
+    sum_gz += (float)readMpuWord() / 65.5f;
     if (i2cMutex != NULL) xSemaphoreGive(i2cMutex);
     
     num_samples++;
@@ -95,11 +180,37 @@ void calibrateMPU(int duration_ms) {
   GyroErrorX = sum_gx / num_samples;
   GyroErrorY = sum_gy / num_samples;
   GyroErrorZ = sum_gz / num_samples;
+  debugGyroZBiasDps = GyroErrorZ;
+  debugGyroZRawDps = GyroErrorZ;
+  debugGyroZCorrectedDps = 0.0f;
+  debugYawDriftDpm = 0.0f;
+  debugGyroZAutoBiasActive = 0;
+  debugGyroZAutoBiasStillMs = 0;
+  debugGyroZAutoBiasReason = 1;
+  autoBiasStillStartMs = 0;
+  autoBiasStartPulseL = pulseL;
+  autoBiasStartPulseR = pulseR;
   
   q0 = 1.0f; q1 = 0.0f; q2 = 0.0f; q3 = 0.0f;
   integralFBx = integralFBy = integralFBz = prevRawAngleZ = 0;
   continuousYaw = 0;
   rotations = 0;
+}
+
+bool rezeroIMU(int duration_ms) {
+  if (imuRezeroActive)
+    return false;
+
+  imuRezeroActive = true;
+  debugGyroZAutoBiasActive = 0;
+  debugGyroZAutoBiasStillMs = 0;
+  debugGyroZAutoBiasReason = 1;
+
+  calibrateMPU(constrain(duration_ms, 300, 3000));
+  target_yaw = continuousYaw;
+
+  imuRezeroActive = false;
+  return true;
 }
 
 void initIMU() {
@@ -115,20 +226,43 @@ void initIMU() {
 }
 
 void updateIMU(float dt) {
+  if (imuRezeroActive)
+    return;
+
   if (i2cMutex != NULL) xSemaphoreTake(i2cMutex, portMAX_DELAY);
   Wire.beginTransmission((uint8_t)MPU_ADDR);
   Wire.write(0x3B);
   Wire.endTransmission(false);
   Wire.requestFrom((uint16_t)MPU_ADDR, (size_t)14, true);
   
-  float accX = (float)(Wire.read() << 8 | Wire.read()) / 8192.0f;
-  float accY = (float)(Wire.read() << 8 | Wire.read()) / 8192.0f;
-  float accZ = (float)(Wire.read() << 8 | Wire.read()) / 8192.0f;
+  float accX = (float)readMpuWord() / 8192.0f;
+  float accY = (float)readMpuWord() / 8192.0f;
+  float accZ = (float)readMpuWord() / 8192.0f;
   Wire.read(); Wire.read(); // Bỏ qua nhiệt độ
-  float gyroX_rad = (((float)(Wire.read() << 8 | Wire.read()) / 65.5f) - GyroErrorX) * (PI / 180.0f);
-  float gyroY_rad = (((float)(Wire.read() << 8 | Wire.read()) / 65.5f) - GyroErrorY) * (PI / 180.0f);
-  float gyroZ_rad = (((float)(Wire.read() << 8 | Wire.read()) / 65.5f) - GyroErrorZ) * (PI / 180.0f);
+  float gyroXRawDps = (float)readMpuWord() / 65.5f;
+  float gyroYRawDps = (float)readMpuWord() / 65.5f;
+  float gyroZRawDps = (float)readMpuWord() / 65.5f;
   if (i2cMutex != NULL) xSemaphoreGive(i2cMutex);
+
+  if (i2cMutex != NULL) xSemaphoreTake(i2cMutex, portMAX_DELAY);
+  Wire.beginTransmission((uint8_t)MPU_ADDR);
+  Wire.write(0x41);
+  Wire.endTransmission(false);
+  Wire.requestFrom((uint16_t)MPU_ADDR, (size_t)2, true);
+  int16_t tempRaw = readMpuWord();
+  if (i2cMutex != NULL) xSemaphoreGive(i2cMutex);
+
+  updateGyroZAutoBias(gyroZRawDps);
+  float gyroZCorrectedDps = gyroZRawDps - GyroErrorZ;
+  float gyroX_rad = (gyroXRawDps - GyroErrorX) * (PI / 180.0f);
+  float gyroY_rad = (gyroYRawDps - GyroErrorY) * (PI / 180.0f);
+  float gyroZ_rad = gyroZCorrectedDps * (PI / 180.0f);
+
+  debugGyroZRawDps = gyroZRawDps;
+  debugGyroZCorrectedDps = gyroZCorrectedDps;
+  debugGyroZBiasDps = GyroErrorZ;
+  debugMpuTempC = ((float)tempRaw / 340.0f) + 36.53f;
+  debugYawDriftDpm = gyroZCorrectedDps * 60.0f;
 
   MahonyUpdate(gyroX_rad, gyroY_rad, gyroZ_rad, accX, accY, accZ, dt);
   

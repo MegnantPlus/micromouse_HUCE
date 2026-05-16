@@ -44,6 +44,9 @@ struct RuntimeParams {
 	int front_stop_early_margin;
 	int maze_dead_end_backup_pulses;
 	int maze_dead_end_backup_pwm;
+	int maze_turn_late_pulses;
+	float maze_turn_angle_deg;
+	int point_turn_backup_pulses;
 	int side_ref_L;
 	int side_ref_FL;
 	int side_ref_FR;
@@ -86,6 +89,9 @@ extern int pulses_per_cell;
 extern int front_stop_early_margin;
 extern int maze_dead_end_backup_pulses;
 extern int maze_dead_end_backup_pwm;
+extern int maze_turn_late_pulses;
+extern float maze_turn_angle_deg;
+extern int point_turn_backup_pulses;
 extern int side_ref_L;
 extern int side_ref_FL;
 extern int side_ref_FR;
@@ -136,6 +142,14 @@ extern Adafruit_NeoPixel pixels;
 
 extern volatile float continuousYaw;
 extern float target_yaw;
+extern volatile float debugGyroZRawDps;
+extern volatile float debugGyroZCorrectedDps;
+extern volatile float debugGyroZBiasDps;
+extern volatile float debugMpuTempC;
+extern volatile float debugYawDriftDpm;
+extern volatile int debugGyroZAutoBiasActive;
+extern volatile uint32_t debugGyroZAutoBiasStillMs;
+extern volatile int debugGyroZAutoBiasReason;
 
 // FreeRTOS Mutex để bảo vệ I2C (nếu cần)
 extern SemaphoreHandle_t i2cMutex;
