@@ -48,6 +48,11 @@ void startBackDrive(long targetPulses);
 bool updateBackDrive(const RuntimeParams &cfg);
 bool updatePointTurnCore(const RuntimeParams &cfg);
 bool updatePointTurn(const RuntimeParams &cfg);
+bool startMatrixStraightSegment(const RuntimeParams &cfg,
+                                long reverseCompensationPulses = 0);
+bool updateMatrixSegmentDrive(const IrSnapshot &ir, const RuntimeParams &cfg,
+                              int &filteredIrSteer, int boostPwmL,
+                              int boostPwmR);
 bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
                          int &filteredIrSteer, int boostPwmL, int boostPwmR);
 
@@ -115,6 +120,7 @@ CellDrivePhase backDrivePhase = CELL_DRIVE_RUN;
 uint32_t backDrivePhaseStartMs = 0;
 int backDriveFineAttempts = 0;
 long backDriveTargetPulses = 0;
+long lastBackDriveCompletedPulses = 0;
 bool pointTurnPostBackupEnabled = false;
 bool pointTurnPostBackupRunning = false;
 MatrixPhase matrixPhase = MATRIX_DECIDE;
@@ -123,6 +129,12 @@ int matrixY = 0;
 uint8_t matrixHeading = MAZE_PATH_N;
 uint8_t matrixNextDir = MAZE_PATH_EMPTY;
 uint32_t matrixSettleStartMs = 0;
+int matrixSegmentStartX = 0;
+int matrixSegmentStartY = 0;
+int matrixSegmentCells = 0;
+long matrixSegmentTargetPulses = 0;
+long matrixSegmentReverseCompensationPulses = 0;
+bool matrixTurnWillBackUp = false;
 
 long absPulse(long value)
 {
@@ -215,6 +227,52 @@ int dirDy(uint8_t dir)
   if (dir == MAZE_PATH_S)
     return -1;
   return 0;
+}
+
+uint8_t oppositeMatrixDir(uint8_t dir)
+{
+  return isMatrixDir(dir) ? (uint8_t)((dir + 2) % 4) : MAZE_PATH_EMPTY;
+}
+
+bool isMatrixMoveBlockedByWall(int x, int y, uint8_t dir)
+{
+  if ((maze_wall_map[x][y] & wallBitForDir(dir)) != 0)
+    return true;
+
+  int nextX = x + dirDx(dir);
+  int nextY = y + dirDy(dir);
+  if (!isMatrixCoordValid(nextX, nextY))
+    return true;
+
+  uint8_t oppositeDir = oppositeMatrixDir(dir);
+  return (maze_wall_map[nextX][nextY] & wallBitForDir(oppositeDir)) != 0;
+}
+
+bool isMatrixMoveAllowed(int x, int y, uint8_t dir)
+{
+  int nextX = x + dirDx(dir);
+  int nextY = y + dirDy(dir);
+  return isMatrixCoordValid(x, y) && isMatrixDir(dir) &&
+         isMatrixCoordValid(nextX, nextY) &&
+         !isMatrixMoveBlockedByWall(x, y, dir);
+}
+
+int countMatrixStraightCells(int x, int y, uint8_t dir)
+{
+  int cells = 0;
+
+  while (isMatrixCoordValid(x, y))
+  {
+    uint8_t cellDir = maze_path_map[x][y];
+    if (cellDir != dir || !isMatrixMoveAllowed(x, y, dir))
+      break;
+
+    cells++;
+    x += dirDx(dir);
+    y += dirDy(dir);
+  }
+
+  return cells;
 }
 
 float turnDegreesForMatrixDir(uint8_t currentDir, uint8_t nextDir,
@@ -416,6 +474,7 @@ void resetMazeRunner()
   pointTurnPostBackupEnabled = false;
   pointTurnPostBackupRunning = false;
   backDriveTargetPulses = 0;
+  lastBackDriveCompletedPulses = 0;
   target_yaw = continuousYaw;
   isTurningTask = false;
 }
@@ -430,6 +489,13 @@ void resetMatrixRunner()
                       : MAZE_PATH_N;
   matrixNextDir = MAZE_PATH_EMPTY;
   matrixSettleStartMs = 0;
+  matrixSegmentStartX = matrixX;
+  matrixSegmentStartY = matrixY;
+  matrixSegmentCells = 0;
+  matrixSegmentTargetPulses = 0;
+  matrixSegmentReverseCompensationPulses = 0;
+  matrixTurnWillBackUp = false;
+  lastBackDriveCompletedPulses = 0;
   debugMazeX = matrixX;
   debugMazeY = matrixY;
   debugMazeHeading = matrixHeading;
@@ -861,6 +927,7 @@ void startBackDrive(long targetPulses)
   resetMotorsAndPID();
   resetRunProfileAndPidMemory();
   resetBackDriveController();
+  lastBackDriveCompletedPulses = 0;
   backDriveTargetPulses = (targetPulses < 0) ? -targetPulses : targetPulses;
 }
 
@@ -868,6 +935,7 @@ bool updateBackDrive(const RuntimeParams &cfg)
 {
   if (backDriveTargetPulses <= 0)
   {
+    lastBackDriveCompletedPulses = 0;
     resetBackDriveController();
     return true;
   }
@@ -914,6 +982,7 @@ bool updateBackDrive(const RuntimeParams &cfg)
     remaining = backDriveTargetPulses - travelAvg;
     if (abs(remaining) <= stopTolerance || backDriveFineAttempts >= 3)
     {
+      lastBackDriveCompletedPulses = travelAvg;
       float headingError = target_yaw - continuousYaw;
       if (fabsf(headingError) > oneCellHeadingTolerance(cfg))
       {
@@ -1174,12 +1243,212 @@ bool updateOneCellDrive(const IrSnapshot &ir, const RuntimeParams &cfg,
   return false;
 }
 
-void startMatrixCellDrive()
+int matrixSegmentBrakeLeadPulses(long targetPulses, const RuntimeParams &cfg)
 {
+  int target = (targetPulses > 20000) ? 20000 : (int)targetPulses;
+  target = max(1, target);
+  int minLead = oneCellBrakeLeadPulses(cfg);
+  int maxLead = constrain(cfg.pulses_per_cell / 2, minLead,
+                          max(minLead, cfg.pulses_per_cell));
+  return constrain(target / 8, minLead, maxLead);
+}
+
+void updateMatrixSegmentDebug(long travelAvg, const RuntimeParams &cfg)
+{
+  long netForwardPulses =
+      travelAvg - matrixSegmentReverseCompensationPulses;
+  if (netForwardPulses < 0)
+    netForwardPulses = 0;
+
+  int completedCells = (int)(netForwardPulses / max(1, cfg.pulses_per_cell));
+  completedCells = constrain(completedCells, 0, matrixSegmentCells);
+
+  debugMazeX = matrixSegmentStartX + dirDx(matrixHeading) * completedCells;
+  debugMazeY = matrixSegmentStartY + dirDy(matrixHeading) * completedCells;
+  debugMazeHeading = matrixHeading;
+  debugMazeNextDir = matrixNextDir;
+}
+
+bool startMatrixStraightSegment(const RuntimeParams &cfg,
+                                long reverseCompensationPulses)
+{
+  int cells = countMatrixStraightCells(matrixX, matrixY, matrixHeading);
+  if (cells <= 0)
+  {
+    debugTotalSteer = -102;
+    return false;
+  }
+
   resetMotorsAndPID();
   resetRunProfileAndPidMemory();
+
+  matrixSegmentStartX = matrixX;
+  matrixSegmentStartY = matrixY;
+  matrixSegmentCells = cells;
+  matrixSegmentReverseCompensationPulses = max(0L, reverseCompensationPulses);
+  matrixSegmentTargetPulses =
+      (long)cells * (long)cfg.pulses_per_cell +
+      matrixSegmentReverseCompensationPulses;
   matrixPhase = MATRIX_DRIVE_CELL;
   isTurningTask = false;
+  return true;
+}
+
+bool updateMatrixSegmentDrive(const IrSnapshot &ir, const RuntimeParams &cfg,
+                              int &filteredIrSteer, int boostPwmL,
+                              int boostPwmR)
+{
+  if (matrixSegmentCells <= 0 || matrixSegmentTargetPulses <= 0)
+    return true;
+
+  PulseSnapshot pulses = getPulseSnapshot();
+  long currentPulseL = pulses.left;
+  long currentPulseR = pulses.right;
+  long travelL = absPulse(currentPulseL);
+  long travelR = absPulse(currentPulseR);
+  long travelAvg = (travelL + travelR) / 2;
+  long remaining = matrixSegmentTargetPulses - travelAvg;
+  int stopTolerance = distanceStopTolerance(matrixSegmentTargetPulses);
+
+  updateMatrixSegmentDebug(travelAvg, cfg);
+
+  if (cellDrivePhase == CELL_DRIVE_HEADING_FINE)
+  {
+    if (updatePointTurnCore(cfg))
+    {
+      resetCellDriveController();
+      return true;
+    }
+    return false;
+  }
+
+  if (cellDrivePhase == CELL_DRIVE_BRAKE)
+  {
+    debugTotalSteer = (int)remaining;
+    if (brakeOneCellDrive(cfg))
+    {
+      cellDrivePhase = CELL_DRIVE_SETTLE;
+      cellDrivePhaseStartMs = millis();
+    }
+    return false;
+  }
+
+  if (cellDrivePhase == CELL_DRIVE_SETTLE)
+  {
+    brakeMotors();
+    debugTotalSteer = (int)remaining;
+    if (millis() - cellDrivePhaseStartMs < 100)
+      return false;
+
+    pulses = getPulseSnapshot();
+    travelAvg = (absPulse(pulses.left) + absPulse(pulses.right)) / 2;
+    remaining = matrixSegmentTargetPulses - travelAvg;
+    updateMatrixSegmentDebug(travelAvg, cfg);
+
+    if (abs(remaining) <= stopTolerance || cellDriveFineAttempts >= 3)
+    {
+      float headingError = fabsf(target_yaw - continuousYaw);
+      if (headingError > oneCellHeadingTolerance(cfg))
+      {
+        filteredIrSteer = 0;
+        startOneCellHeadingCorrection();
+        return false;
+      }
+
+      resetCellDriveController();
+      return true;
+    }
+
+    cellDrivePhase = CELL_DRIVE_FINE;
+    cellDrivePhaseStartMs = millis();
+    cellDriveFineAttempts++;
+    return false;
+  }
+
+  if (cellDrivePhase == CELL_DRIVE_FINE)
+  {
+    if (abs(remaining) <= stopTolerance ||
+        millis() - cellDrivePhaseStartMs > 500)
+    {
+      cellDrivePhase = CELL_DRIVE_BRAKE;
+      return false;
+    }
+
+    int direction = (remaining > 0) ? 1 : -1;
+    int finePwm = oneCellFinePwm(cfg) * direction;
+    setLeftMotor(applyRateLimit(finePwm, pwmL, max(1, cfg.ramp_rate / 2)));
+    setRightMotor(applyRateLimit(finePwm, pwmR, max(1, cfg.ramp_rate / 2)));
+    debugSteerIR = 0;
+    debugTotalSteer = (int)remaining;
+    return false;
+  }
+
+  int brakeLead = matrixSegmentBrakeLeadPulses(matrixSegmentTargetPulses, cfg);
+  if (remaining <= brakeLead)
+  {
+    cellDrivePhase = CELL_DRIVE_BRAKE;
+    return false;
+  }
+
+  WallAvoidanceResult wallAvoidance = computeStraightWallAvoidance(ir, cfg);
+  int sideSteer = correctFromSideWalls(ir, cfg);
+  int targetSteerIR = wallAvoidance.active ? wallAvoidance.steer : sideSteer;
+  filteredIrSteer =
+      (filteredIrSteer * IR_STEER_FILTER_KEEP + targetSteerIR) /
+      IR_STEER_FILTER_TOTAL;
+  if (targetSteerIR == 0 && abs(filteredIrSteer) <= 1)
+    filteredIrSteer = 0;
+  debugSteerIR = filteredIrSteer;
+
+  float speedL = (float)absPulse(currentPulseL - lastSpeedPulseL);
+  float speedR = (float)absPulse(currentPulseR - lastSpeedPulseR);
+  lastSpeedPulseL = currentPulseL;
+  lastSpeedPulseR = currentPulseR;
+
+  float decelScale =
+      constrain((float)(remaining - brakeLead) / (float)brakeLead, 0.0f, 1.0f);
+  float targetVel = cfg.min_vel + (cfg.max_vel - cfg.min_vel) * decelScale;
+  if (virtualVel > targetVel)
+    virtualVel = max(targetVel, virtualVel - cfg.accel_rate * 2.0f);
+  else
+    virtualVel = min(targetVel, virtualVel + cfg.accel_rate);
+  virtualVel = constrain(virtualVel, cfg.min_vel, cfg.max_vel);
+  virtualPos = travelAvg;
+
+  int pidTrimL = computeWheelSpeedPid(virtualVel, speedL, cfg.Kp_L,
+                                      cfg.Ki_L, cfg.Kd_L, integralL,
+                                      prevErrL, dFilterL);
+  int pidTrimR = computeWheelSpeedPid(virtualVel, speedR, cfg.Kp_R,
+                                      cfg.Ki_R, cfg.Kd_R, integralR,
+                                      prevErrR, dFilterR);
+
+  float pwmScale =
+      constrain((float)(remaining - brakeLead) / (float)(brakeLead * 2),
+                0.0f, 1.0f);
+  int baseCommand =
+      cfg.Turn_Min + (int)((cfg.base_pwm - cfg.Turn_Min) * pwmScale);
+  int basePwmL = keepMotorRunningPwm(baseCommand + pidTrimL, cfg);
+  int basePwmR = keepMotorRunningPwm(baseCommand + pidTrimR, cfg);
+  int steerLimit = driveSteerLimit(cfg);
+  int gyroSteer = computeHeadingHoldSteer(cfg, steerLimit);
+  int encoderSteer = computeEncoderBalanceSteer(travelL, travelR, cfg);
+  int totalSteer = constrain(gyroSteer + filteredIrSteer + encoderSteer,
+                             -steerLimit, steerLimit);
+  debugTotalSteer = totalSteer;
+
+  int targetPwm_L =
+      keepMotorRunningPwm(basePwmL + totalSteer + cfg.wheel_trim_L, cfg);
+  int targetPwm_R =
+      keepMotorRunningPwm(basePwmR - totalSteer + cfg.wheel_trim_R, cfg);
+
+  targetPwm_L = constrain(targetPwm_L + boostPwmL, 0, cfg.Turn_Max);
+  targetPwm_R = constrain(targetPwm_R + boostPwmR, 0, cfg.Turn_Max);
+
+  int newPwm_L = applyRateLimit(targetPwm_L, pwmL, cfg.ramp_rate);
+  int newPwm_R = applyRateLimit(targetPwm_R, pwmR, cfg.ramp_rate);
+  setLeftMotor(newPwm_L);
+  setRightMotor(newPwm_R);
+  return false;
 }
 
 bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
@@ -1212,26 +1481,32 @@ bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
   {
     if (updatePointTurn(cfg))
     {
+      long reverseCompensationPulses =
+          matrixTurnWillBackUp ? lastBackDriveCompletedPulses : 0;
+      matrixTurnWillBackUp = false;
       matrixHeading = matrixNextDir;
       filteredIrSteer = 0;
       debugMazeHeading = matrixHeading;
-      startMatrixCellDrive();
+      if (!startMatrixStraightSegment(cfg, reverseCompensationPulses))
+        return true;
     }
     return false;
   }
 
   if (matrixPhase == MATRIX_DRIVE_CELL)
   {
-    if (updateOneCellDrive(ir, cfg, filteredIrSteer, boostPwmL, boostPwmR,
-                           false, nullptr))
+    if (updateMatrixSegmentDrive(ir, cfg, filteredIrSteer, boostPwmL,
+                                 boostPwmR))
     {
-      matrixX += dirDx(matrixHeading);
-      matrixY += dirDy(matrixHeading);
+      matrixX = matrixSegmentStartX + dirDx(matrixHeading) * matrixSegmentCells;
+      matrixY = matrixSegmentStartY + dirDy(matrixHeading) * matrixSegmentCells;
       debugMazeX = matrixX;
       debugMazeY = matrixY;
       filteredIrSteer = 0;
-      matrixSettleStartMs = millis();
-      matrixPhase = MATRIX_SETTLE_AT_CELL;
+      matrixSegmentCells = 0;
+      matrixSegmentTargetPulses = 0;
+      matrixSegmentReverseCompensationPulses = 0;
+      matrixPhase = MATRIX_DECIDE;
       brakeMotors();
     }
     return false;
@@ -1251,12 +1526,6 @@ bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
     return true;
   }
 
-  if ((maze_wall_map[matrixX][matrixY] & wallBitForDir(nextDir)) != 0)
-  {
-    debugTotalSteer = -100;
-    return true;
-  }
-
   int nextX = matrixX + dirDx(nextDir);
   int nextY = matrixY + dirDy(nextDir);
   if (!isMatrixCoordValid(nextX, nextY))
@@ -1265,17 +1534,26 @@ bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
     return true;
   }
 
+  if (isMatrixMoveBlockedByWall(matrixX, matrixY, nextDir))
+  {
+    debugTotalSteer = -100;
+    return true;
+  }
+
   float turnDegrees = turnDegreesForMatrixDir(matrixHeading, nextDir, cfg);
   if (fabsf(turnDegrees) > 0.1f)
   {
+    matrixTurnWillBackUp = cfg.point_turn_backup_pulses > 0;
     beginPointTurn(turnDegrees);
     matrixPhase = MATRIX_TURNING;
   }
   else
   {
+    matrixTurnWillBackUp = false;
     matrixHeading = nextDir;
     debugMazeHeading = matrixHeading;
-    startMatrixCellDrive();
+    if (!startMatrixStraightSegment(cfg, 0))
+      return true;
   }
 
   return false;
