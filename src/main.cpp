@@ -50,10 +50,12 @@ bool updatePointTurnCore(const RuntimeParams &cfg);
 bool updatePointTurn(const RuntimeParams &cfg);
 bool startMatrixStraightSegment(const RuntimeParams &cfg,
                                 long reverseCompensationPulses = 0);
-bool updateMatrixSegmentDrive(const IrSnapshot &ir, const RuntimeParams &cfg,
+bool updateMatrixSegmentDrive(const IrSnapshot &ir, const IrSnapshot &frontIr,
+                              const RuntimeParams &cfg,
                               int &filteredIrSteer, int boostPwmL,
                               int boostPwmR);
-bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
+bool updateMatrixPathRun(const IrSnapshot &ir, const IrSnapshot &frontIr,
+                         const RuntimeParams &cfg,
                          int &filteredIrSteer, int boostPwmL, int boostPwmR);
 
 enum MazePhase
@@ -135,6 +137,7 @@ int matrixSegmentCells = 0;
 long matrixSegmentTargetPulses = 0;
 long matrixSegmentReverseCompensationPulses = 0;
 bool matrixTurnWillBackUp = false;
+bool matrixSegmentFrontWallAbort = false;
 
 long absPulse(long value)
 {
@@ -459,6 +462,12 @@ MazeWalls readMazeWalls(const IrSnapshot &ir, const RuntimeParams &cfg)
   return walls;
 }
 
+bool isMazeFrontStopDetected(const IrSnapshot &ir, const RuntimeParams &cfg)
+{
+  return isMazeFrontWallBySensor(SENSOR_L, ir, cfg) ||
+         isMazeFrontWallBySensor(SENSOR_R, ir, cfg);
+}
+
 void resetMazeRunner()
 {
   mazePhase = MAZE_RUN_TO_WALL;
@@ -495,6 +504,7 @@ void resetMatrixRunner()
   matrixSegmentTargetPulses = 0;
   matrixSegmentReverseCompensationPulses = 0;
   matrixTurnWillBackUp = false;
+  matrixSegmentFrontWallAbort = false;
   lastBackDriveCompletedPulses = 0;
   debugMazeX = matrixX;
   debugMazeY = matrixY;
@@ -1260,7 +1270,7 @@ long matrixSegmentPhysicalTargetPulses()
 
 long matrixSegmentNetForwardPulses(long travelAvg)
 {
-  return travelAvg - matrixSegmentReverseCompensationPulses;
+  return travelAvg - 2*matrixSegmentReverseCompensationPulses;
 }
 
 long matrixSegmentRemainingPulses(long travelAvg)
@@ -1268,14 +1278,30 @@ long matrixSegmentRemainingPulses(long travelAvg)
   return matrixSegmentTargetPulses - matrixSegmentNetForwardPulses(travelAvg);
 }
 
-void updateMatrixSegmentDebug(long travelAvg, const RuntimeParams &cfg)
+long matrixSegmentPositiveNetForwardPulses(long travelAvg)
 {
   long netForwardPulses = matrixSegmentNetForwardPulses(travelAvg);
-  if (netForwardPulses < 0)
-    netForwardPulses = 0;
+  return (netForwardPulses < 0) ? 0 : netForwardPulses;
+}
 
-  int completedCells = (int)(netForwardPulses / max(1, cfg.pulses_per_cell));
-  completedCells = constrain(completedCells, 0, matrixSegmentCells);
+int matrixSegmentCompletedCellsFromTravel(long travelAvg,
+                                          const RuntimeParams &cfg,
+                                          bool countPartialCell)
+{
+  long netForwardPulses = matrixSegmentPositiveNetForwardPulses(travelAvg);
+  int pulsesPerCell = max(1, cfg.pulses_per_cell);
+  long completedCells = countPartialCell
+                            ? ((netForwardPulses + pulsesPerCell - 1) /
+                               pulsesPerCell)
+                            : (netForwardPulses / pulsesPerCell);
+
+  return constrain((int)completedCells, 0, matrixSegmentCells);
+}
+
+void updateMatrixSegmentDebug(long travelAvg, const RuntimeParams &cfg)
+{
+  int completedCells =
+      matrixSegmentCompletedCellsFromTravel(travelAvg, cfg, false);
 
   debugMazeX = matrixSegmentStartX + dirDx(matrixHeading) * completedCells;
   debugMazeY = matrixSegmentStartY + dirDy(matrixHeading) * completedCells;
@@ -1302,12 +1328,28 @@ bool startMatrixStraightSegment(const RuntimeParams &cfg,
   matrixSegmentReverseCompensationPulses = max(0L, reverseCompensationPulses);
   matrixSegmentTargetPulses =
       (long)cells * (long)cfg.pulses_per_cell;
+  matrixSegmentFrontWallAbort = false;
   matrixPhase = MATRIX_DRIVE_CELL;
   isTurningTask = false;
   return true;
 }
 
-bool updateMatrixSegmentDrive(const IrSnapshot &ir, const RuntimeParams &cfg,
+void abortMatrixSegmentAtFrontWall(long travelAvg, const RuntimeParams &cfg)
+{
+  long netForwardPulses = matrixSegmentPositiveNetForwardPulses(travelAvg);
+  int completedCells =
+      matrixSegmentCompletedCellsFromTravel(travelAvg, cfg, true);
+
+  matrixSegmentTargetPulses = max(1L, netForwardPulses);
+  matrixSegmentCells = completedCells;
+  matrixSegmentFrontWallAbort = true;
+  cellDrivePhase = CELL_DRIVE_BRAKE;
+  debugSteerIR = 1;
+  debugTotalSteer = 0;
+}
+
+bool updateMatrixSegmentDrive(const IrSnapshot &ir, const IrSnapshot &frontIr,
+                              const RuntimeParams &cfg,
                               int &filteredIrSteer, int boostPwmL,
                               int boostPwmR)
 {
@@ -1324,6 +1366,16 @@ bool updateMatrixSegmentDrive(const IrSnapshot &ir, const RuntimeParams &cfg,
   int stopTolerance = oneCellStopTolerance(cfg);
 
   updateMatrixSegmentDebug(travelAvg, cfg);
+
+  if (!matrixSegmentFrontWallAbort &&
+      isMazeFrontStopDetected(frontIr, cfg) &&
+      matrixSegmentRemainingPulses(travelAvg) > stopTolerance)
+  {
+    abortMatrixSegmentAtFrontWall(travelAvg, cfg);
+    remaining = matrixSegmentRemainingPulses(travelAvg);
+    updateMatrixSegmentDebug(travelAvg, cfg);
+    filteredIrSteer = 0;
+  }
 
   if (cellDrivePhase == CELL_DRIVE_HEADING_FINE)
   {
@@ -1465,7 +1517,8 @@ bool updateMatrixSegmentDrive(const IrSnapshot &ir, const RuntimeParams &cfg,
   return false;
 }
 
-bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
+bool updateMatrixPathRun(const IrSnapshot &ir, const IrSnapshot &frontIr,
+                         const RuntimeParams &cfg,
                          int &filteredIrSteer, int boostPwmL, int boostPwmR)
 {
   debugMazeX = matrixX;
@@ -1509,9 +1562,11 @@ bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
 
   if (matrixPhase == MATRIX_DRIVE_CELL)
   {
-    if (updateMatrixSegmentDrive(ir, cfg, filteredIrSteer, boostPwmL,
+    if (updateMatrixSegmentDrive(ir, frontIr, cfg, filteredIrSteer, boostPwmL,
                                  boostPwmR))
     {
+      bool stoppedByFrontWall = matrixSegmentFrontWallAbort;
+      bool completedAnyCell = matrixSegmentCells > 0;
       matrixX = matrixSegmentStartX + dirDx(matrixHeading) * matrixSegmentCells;
       matrixY = matrixSegmentStartY + dirDy(matrixHeading) * matrixSegmentCells;
       debugMazeX = matrixX;
@@ -1520,8 +1575,13 @@ bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
       matrixSegmentCells = 0;
       matrixSegmentTargetPulses = 0;
       matrixSegmentReverseCompensationPulses = 0;
+      matrixSegmentFrontWallAbort = false;
       matrixPhase = MATRIX_DECIDE;
       brakeMotors();
+
+      if (stoppedByFrontWall &&
+          (!completedAnyCell || !isMatrixCoordValid(matrixX, matrixY)))
+        return true;
     }
     return false;
   }
@@ -1818,7 +1878,7 @@ void mainControlTask(void *pvParameters)
           break;
 
         case MAZE_MATRIX_RUN:
-          if (updateMatrixPathRun(ir, cfg, filteredIrSteer, boostPwmL,
+          if (updateMatrixPathRun(ir, rawIr, cfg, filteredIrSteer, boostPwmL,
                                   boostPwmR))
           {
             changeState(IDLE);
