@@ -1253,10 +1253,24 @@ int matrixSegmentBrakeLeadPulses(long targetPulses, const RuntimeParams &cfg)
   return constrain(target / 8, minLead, maxLead);
 }
 
+long matrixSegmentPhysicalTargetPulses()
+{
+  return matrixSegmentTargetPulses + matrixSegmentReverseCompensationPulses;
+}
+
+long matrixSegmentNetForwardPulses(long travelAvg)
+{
+  return travelAvg - matrixSegmentReverseCompensationPulses;
+}
+
+long matrixSegmentRemainingPulses(long travelAvg)
+{
+  return matrixSegmentTargetPulses - matrixSegmentNetForwardPulses(travelAvg);
+}
+
 void updateMatrixSegmentDebug(long travelAvg, const RuntimeParams &cfg)
 {
-  long netForwardPulses =
-      travelAvg - matrixSegmentReverseCompensationPulses;
+  long netForwardPulses = matrixSegmentNetForwardPulses(travelAvg);
   if (netForwardPulses < 0)
     netForwardPulses = 0;
 
@@ -1287,8 +1301,7 @@ bool startMatrixStraightSegment(const RuntimeParams &cfg,
   matrixSegmentCells = cells;
   matrixSegmentReverseCompensationPulses = max(0L, reverseCompensationPulses);
   matrixSegmentTargetPulses =
-      (long)cells * (long)cfg.pulses_per_cell +
-      matrixSegmentReverseCompensationPulses;
+      (long)cells * (long)cfg.pulses_per_cell;
   matrixPhase = MATRIX_DRIVE_CELL;
   isTurningTask = false;
   return true;
@@ -1307,8 +1320,8 @@ bool updateMatrixSegmentDrive(const IrSnapshot &ir, const RuntimeParams &cfg,
   long travelL = absPulse(currentPulseL);
   long travelR = absPulse(currentPulseR);
   long travelAvg = (travelL + travelR) / 2;
-  long remaining = matrixSegmentTargetPulses - travelAvg;
-  int stopTolerance = distanceStopTolerance(matrixSegmentTargetPulses);
+  long remaining = matrixSegmentRemainingPulses(travelAvg);
+  int stopTolerance = oneCellStopTolerance(cfg);
 
   updateMatrixSegmentDebug(travelAvg, cfg);
 
@@ -1342,7 +1355,7 @@ bool updateMatrixSegmentDrive(const IrSnapshot &ir, const RuntimeParams &cfg,
 
     pulses = getPulseSnapshot();
     travelAvg = (absPulse(pulses.left) + absPulse(pulses.right)) / 2;
-    remaining = matrixSegmentTargetPulses - travelAvg;
+    remaining = matrixSegmentRemainingPulses(travelAvg);
     updateMatrixSegmentDebug(travelAvg, cfg);
 
     if (abs(remaining) <= stopTolerance || cellDriveFineAttempts >= 3)
@@ -1383,7 +1396,8 @@ bool updateMatrixSegmentDrive(const IrSnapshot &ir, const RuntimeParams &cfg,
     return false;
   }
 
-  int brakeLead = matrixSegmentBrakeLeadPulses(matrixSegmentTargetPulses, cfg);
+  int brakeLead =
+      matrixSegmentBrakeLeadPulses(matrixSegmentPhysicalTargetPulses(), cfg);
   if (remaining <= brakeLead)
   {
     cellDrivePhase = CELL_DRIVE_BRAKE;
