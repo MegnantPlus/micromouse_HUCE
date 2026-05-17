@@ -48,6 +48,8 @@ void startBackDrive(long targetPulses);
 bool updateBackDrive(const RuntimeParams &cfg);
 bool updatePointTurnCore(const RuntimeParams &cfg);
 bool updatePointTurn(const RuntimeParams &cfg);
+bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
+                         int &filteredIrSteer, int boostPwmL, int boostPwmR);
 
 enum MazePhase
 {
@@ -81,6 +83,14 @@ enum CellDrivePhase
   CELL_DRIVE_HEADING_FINE
 };
 
+enum MatrixPhase
+{
+  MATRIX_DECIDE,
+  MATRIX_TURNING,
+  MATRIX_DRIVE_CELL,
+  MATRIX_SETTLE_AT_CELL
+};
+
 struct MazeWalls
 {
   bool left;
@@ -107,6 +117,12 @@ int backDriveFineAttempts = 0;
 long backDriveTargetPulses = 0;
 bool pointTurnPostBackupEnabled = false;
 bool pointTurnPostBackupRunning = false;
+MatrixPhase matrixPhase = MATRIX_DECIDE;
+int matrixX = 0;
+int matrixY = 0;
+uint8_t matrixHeading = MAZE_PATH_N;
+uint8_t matrixNextDir = MAZE_PATH_EMPTY;
+uint32_t matrixSettleStartMs = 0;
 
 long absPulse(long value)
 {
@@ -136,7 +152,8 @@ float mazeTurnLeftDeg(const RuntimeParams &cfg)
 
 bool isMazeRunState(RunState state)
 {
-  return state == MAZE_RIGHT_HAND || state == MAZE_RIGHT_HAND_CELL;
+  return state == MAZE_RIGHT_HAND || state == MAZE_RIGHT_HAND_CELL ||
+         state == MAZE_MATRIX_RUN;
 }
 
 bool isMazeCellRunState()
@@ -152,6 +169,65 @@ bool isPointTurnTestState(RunState state)
 bool isBackDriveTestState(RunState state)
 {
   return state == TEST_BACK_ONE_CELL;
+}
+
+bool isMatrixDir(uint8_t dir)
+{
+  return dir == MAZE_PATH_N || dir == MAZE_PATH_E ||
+         dir == MAZE_PATH_S || dir == MAZE_PATH_W;
+}
+
+bool isMatrixCoordValid(int x, int y)
+{
+  return x >= 0 && x < MAZE_GRID_W && y >= 0 && y < MAZE_GRID_H;
+}
+
+uint8_t wallBitForDir(uint8_t dir)
+{
+  switch (dir)
+  {
+  case MAZE_PATH_N:
+    return MAZE_WALL_N;
+  case MAZE_PATH_E:
+    return MAZE_WALL_E;
+  case MAZE_PATH_S:
+    return MAZE_WALL_S;
+  case MAZE_PATH_W:
+    return MAZE_WALL_W;
+  default:
+    return 0;
+  }
+}
+
+int dirDx(uint8_t dir)
+{
+  if (dir == MAZE_PATH_E)
+    return 1;
+  if (dir == MAZE_PATH_W)
+    return -1;
+  return 0;
+}
+
+int dirDy(uint8_t dir)
+{
+  if (dir == MAZE_PATH_N)
+    return 1;
+  if (dir == MAZE_PATH_S)
+    return -1;
+  return 0;
+}
+
+float turnDegreesForMatrixDir(uint8_t currentDir, uint8_t nextDir,
+                              const RuntimeParams &cfg)
+{
+  int delta = ((int)nextDir - (int)currentDir + 4) % 4;
+  if (delta == 1)
+    return mazeTurnRightDeg(cfg);
+  if (delta == 3)
+    return mazeTurnLeftDeg(cfg);
+  if (delta == 2)
+    return 2.0f * mazeTurnRightDeg(cfg);
+  return 0.0f;
 }
 
 int sensorValueByIndex(const IrSnapshot &ir, int sensorIndex)
@@ -340,6 +416,24 @@ void resetMazeRunner()
   pointTurnPostBackupEnabled = false;
   pointTurnPostBackupRunning = false;
   backDriveTargetPulses = 0;
+  target_yaw = continuousYaw;
+  isTurningTask = false;
+}
+
+void resetMatrixRunner()
+{
+  matrixPhase = MATRIX_DECIDE;
+  matrixX = constrain(maze_start_x, 0, MAZE_GRID_W - 1);
+  matrixY = constrain(maze_start_y, 0, MAZE_GRID_H - 1);
+  matrixHeading = isMatrixDir((uint8_t)maze_start_heading)
+                      ? (uint8_t)maze_start_heading
+                      : MAZE_PATH_N;
+  matrixNextDir = MAZE_PATH_EMPTY;
+  matrixSettleStartMs = 0;
+  debugMazeX = matrixX;
+  debugMazeY = matrixY;
+  debugMazeHeading = matrixHeading;
+  debugMazeNextDir = matrixNextDir;
   target_yaw = continuousYaw;
   isTurningTask = false;
 }
@@ -1080,6 +1174,113 @@ bool updateOneCellDrive(const IrSnapshot &ir, const RuntimeParams &cfg,
   return false;
 }
 
+void startMatrixCellDrive()
+{
+  resetMotorsAndPID();
+  resetRunProfileAndPidMemory();
+  matrixPhase = MATRIX_DRIVE_CELL;
+  isTurningTask = false;
+}
+
+bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
+                         int &filteredIrSteer, int boostPwmL, int boostPwmR)
+{
+  debugMazeX = matrixX;
+  debugMazeY = matrixY;
+  debugMazeHeading = matrixHeading;
+  debugMazeNextDir = matrixNextDir;
+
+  if (!isMatrixCoordValid(matrixX, matrixY))
+    return true;
+
+  if (matrixPhase == MATRIX_SETTLE_AT_CELL)
+  {
+    brakeMotors();
+    filteredIrSteer = 0;
+    uint32_t elapsedMs = millis() - matrixSettleStartMs;
+    debugSteerIR = 0;
+    debugTotalSteer =
+        (int)((elapsedMs >= MAZE_CELL_DECISION_WAIT_MS)
+                  ? 0
+                  : (MAZE_CELL_DECISION_WAIT_MS - elapsedMs));
+    if (elapsedMs >= MAZE_CELL_DECISION_WAIT_MS)
+      matrixPhase = MATRIX_DECIDE;
+    return false;
+  }
+
+  if (matrixPhase == MATRIX_TURNING)
+  {
+    if (updatePointTurn(cfg))
+    {
+      matrixHeading = matrixNextDir;
+      filteredIrSteer = 0;
+      debugMazeHeading = matrixHeading;
+      startMatrixCellDrive();
+    }
+    return false;
+  }
+
+  if (matrixPhase == MATRIX_DRIVE_CELL)
+  {
+    if (updateOneCellDrive(ir, cfg, filteredIrSteer, boostPwmL, boostPwmR,
+                           false, nullptr))
+    {
+      matrixX += dirDx(matrixHeading);
+      matrixY += dirDy(matrixHeading);
+      debugMazeX = matrixX;
+      debugMazeY = matrixY;
+      filteredIrSteer = 0;
+      matrixSettleStartMs = millis();
+      matrixPhase = MATRIX_SETTLE_AT_CELL;
+      brakeMotors();
+    }
+    return false;
+  }
+
+  brakeMotors();
+  filteredIrSteer = 0;
+
+  uint8_t nextDir = maze_path_map[matrixX][matrixY];
+  matrixNextDir = nextDir;
+  debugMazeNextDir = matrixNextDir;
+
+  if (nextDir == MAZE_PATH_STOP || nextDir == MAZE_PATH_EMPTY ||
+      !isMatrixDir(nextDir))
+  {
+    debugTotalSteer = 0;
+    return true;
+  }
+
+  if ((maze_wall_map[matrixX][matrixY] & wallBitForDir(nextDir)) != 0)
+  {
+    debugTotalSteer = -100;
+    return true;
+  }
+
+  int nextX = matrixX + dirDx(nextDir);
+  int nextY = matrixY + dirDy(nextDir);
+  if (!isMatrixCoordValid(nextX, nextY))
+  {
+    debugTotalSteer = -101;
+    return true;
+  }
+
+  float turnDegrees = turnDegreesForMatrixDir(matrixHeading, nextDir, cfg);
+  if (fabsf(turnDegrees) > 0.1f)
+  {
+    beginPointTurn(turnDegrees);
+    matrixPhase = MATRIX_TURNING;
+  }
+  else
+  {
+    matrixHeading = nextDir;
+    debugMazeHeading = matrixHeading;
+    startMatrixCellDrive();
+  }
+
+  return false;
+}
+
 void resetWheelPidMemory()
 {
   PulseSnapshot pulses = getPulseSnapshot();
@@ -1202,6 +1403,15 @@ void changeState(RunState newState)
     pixels.setPixelColor(0, pixels.Color(128, 128, 255));
     break;
   }
+  case MAZE_MATRIX_RUN:
+    resetWheelPidMemory();
+    virtualVel = 0.0f;
+    virtualPos = 0.0f;
+    target_yaw = continuousYaw;
+    resetMatrixRunner();
+    isRunning = true;
+    pixels.setPixelColor(0, pixels.Color(0, 255, 180));
+    break;
   case IDLE:
   default:
     isRunning = false;
@@ -1310,6 +1520,14 @@ void mainControlTask(void *pvParameters)
 
         case TEST_BACK_ONE_CELL:
           if (updateBackDrive(cfg))
+          {
+            changeState(IDLE);
+          }
+          break;
+
+        case MAZE_MATRIX_RUN:
+          if (updateMatrixPathRun(ir, cfg, filteredIrSteer, boostPwmL,
+                                  boostPwmR))
           {
             changeState(IDLE);
           }

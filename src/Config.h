@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 #define LED_PIN 48
 #define NUMPIXELS 1
 
@@ -32,6 +34,22 @@ constexpr int FRONT_STOP_BRAKE_RAMP_MULTIPLIER = 3;
 
 constexpr bool AUTO_START = true;
 
+constexpr int MAZE_GRID_W = 16;
+constexpr int MAZE_GRID_H = 16;
+constexpr int MAZE_GRID_CELLS = MAZE_GRID_W * MAZE_GRID_H;
+
+constexpr uint8_t MAZE_WALL_W = 0x01;
+constexpr uint8_t MAZE_WALL_E = 0x02;
+constexpr uint8_t MAZE_WALL_S = 0x04;
+constexpr uint8_t MAZE_WALL_N = 0x08;
+
+constexpr uint8_t MAZE_PATH_N = 0;
+constexpr uint8_t MAZE_PATH_E = 1;
+constexpr uint8_t MAZE_PATH_S = 2;
+constexpr uint8_t MAZE_PATH_W = 3;
+constexpr uint8_t MAZE_PATH_STOP = 4;
+constexpr uint8_t MAZE_PATH_EMPTY = 255;
+
 enum RunState {
   IDLE,
   WAIT_1S,
@@ -45,5 +63,6 @@ enum RunState {
   TEST_BACK_ONE_CELL,
   PID_RUN_ONE_CELL,
   MAZE_RIGHT_HAND,
-  MAZE_RIGHT_HAND_CELL
+  MAZE_RIGHT_HAND_CELL,
+  MAZE_MATRIX_RUN
 };

@@ -158,6 +158,32 @@ volatile int debugSideErrorR = 0;
 volatile int debugSteerIR = 0;
 volatile int debugTotalSteer = 0;
 
+uint8_t maze_wall_map[MAZE_GRID_W][MAZE_GRID_H] = {};
+uint8_t maze_path_map[MAZE_GRID_W][MAZE_GRID_H] = {};
+int maze_start_x = 0;
+int maze_start_y = 0;
+int maze_start_heading = MAZE_PATH_N;
+volatile int debugMazeX = -1;
+volatile int debugMazeY = -1;
+volatile int debugMazeHeading = MAZE_PATH_N;
+volatile int debugMazeNextDir = MAZE_PATH_EMPTY;
+
+void resetMazeMaps() {
+  for (int y = 0; y < MAZE_GRID_H; y++) {
+    for (int x = 0; x < MAZE_GRID_W; x++) {
+      maze_wall_map[x][y] = 0;
+      maze_path_map[x][y] = MAZE_PATH_EMPTY;
+    }
+  }
+  maze_start_x = 0;
+  maze_start_y = 0;
+  maze_start_heading = MAZE_PATH_N;
+  debugMazeX = -1;
+  debugMazeY = -1;
+  debugMazeHeading = MAZE_PATH_N;
+  debugMazeNextDir = MAZE_PATH_EMPTY;
+}
+
 RuntimeParams captureActiveRuntimeParams() {
   RuntimeParams params;
 

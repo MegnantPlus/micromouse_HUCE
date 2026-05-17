@@ -130,6 +130,18 @@ extern volatile int debugSideErrorR;
 extern volatile int debugSteerIR;
 extern volatile int debugTotalSteer;
 
+extern uint8_t maze_wall_map[MAZE_GRID_W][MAZE_GRID_H];
+extern uint8_t maze_path_map[MAZE_GRID_W][MAZE_GRID_H];
+extern int maze_start_x;
+extern int maze_start_y;
+extern int maze_start_heading;
+extern volatile int debugMazeX;
+extern volatile int debugMazeY;
+extern volatile int debugMazeHeading;
+extern volatile int debugMazeNextDir;
+
+void resetMazeMaps();
+
 RuntimeParams captureActiveRuntimeParams();
 void applyActiveRuntimeParams(const RuntimeParams &params);
 void queuePendingRuntimeParams(const RuntimeParams &params);

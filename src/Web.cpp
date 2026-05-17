@@ -149,6 +149,118 @@ void saveRuntimeParams() {
   settings.end();
 }
 
+uint8_t hexToNibble(char c) {
+  if (c >= '0' && c <= '9')
+    return c - '0';
+  if (c >= 'A' && c <= 'F')
+    return 10 + c - 'A';
+  if (c >= 'a' && c <= 'f')
+    return 10 + c - 'a';
+  return 0;
+}
+
+char nibbleToHex(uint8_t value) {
+  value &= 0x0F;
+  return (value < 10) ? ('0' + value) : ('A' + value - 10);
+}
+
+uint8_t pathCharToValue(char c) {
+  if (c == 'N' || c == 'n')
+    return MAZE_PATH_N;
+  if (c == 'E' || c == 'e')
+    return MAZE_PATH_E;
+  if (c == 'S' || c == 's')
+    return MAZE_PATH_S;
+  if (c == 'W' || c == 'w')
+    return MAZE_PATH_W;
+  if (c == 'X' || c == 'x')
+    return MAZE_PATH_STOP;
+  return MAZE_PATH_EMPTY;
+}
+
+char pathValueToChar(uint8_t value) {
+  switch (value) {
+  case MAZE_PATH_N:
+    return 'N';
+  case MAZE_PATH_E:
+    return 'E';
+  case MAZE_PATH_S:
+    return 'S';
+  case MAZE_PATH_W:
+    return 'W';
+  case MAZE_PATH_STOP:
+    return 'X';
+  default:
+    return '.';
+  }
+}
+
+String serializeMazeWalls() {
+  String out;
+  out.reserve(MAZE_GRID_CELLS);
+  for (int y = 0; y < MAZE_GRID_H; y++) {
+    for (int x = 0; x < MAZE_GRID_W; x++) {
+      out += nibbleToHex(maze_wall_map[x][y]);
+    }
+  }
+  return out;
+}
+
+String serializeMazePath() {
+  String out;
+  out.reserve(MAZE_GRID_CELLS);
+  for (int y = 0; y < MAZE_GRID_H; y++) {
+    for (int x = 0; x < MAZE_GRID_W; x++) {
+      out += pathValueToChar(maze_path_map[x][y]);
+    }
+  }
+  return out;
+}
+
+void applyMazeStrings(const String &walls, const String &path) {
+  for (int y = 0; y < MAZE_GRID_H; y++) {
+    for (int x = 0; x < MAZE_GRID_W; x++) {
+      int idx = y * MAZE_GRID_W + x;
+      maze_wall_map[x][y] =
+          (idx < walls.length()) ? (hexToNibble(walls[idx]) & 0x0F) : 0;
+      maze_path_map[x][y] =
+          (idx < path.length()) ? pathCharToValue(path[idx]) : MAZE_PATH_EMPTY;
+    }
+  }
+}
+
+void loadMazeConfig() {
+  resetMazeMaps();
+  settings.begin("robot_pid", true);
+  String walls = settings.getString("mazeWalls", "");
+  String path = settings.getString("mazePath", "");
+  maze_start_x = settings.getInt("mazeSX", maze_start_x);
+  maze_start_y = settings.getInt("mazeSY", maze_start_y);
+  maze_start_heading = settings.getInt("mazeHead", maze_start_heading);
+  settings.end();
+
+  maze_start_x = constrain(maze_start_x, 0, MAZE_GRID_W - 1);
+  maze_start_y = constrain(maze_start_y, 0, MAZE_GRID_H - 1);
+  if (maze_start_heading < MAZE_PATH_N || maze_start_heading > MAZE_PATH_W)
+    maze_start_heading = MAZE_PATH_N;
+  applyMazeStrings(walls, path);
+}
+
+void saveMazeConfig() {
+  maze_start_x = constrain(maze_start_x, 0, MAZE_GRID_W - 1);
+  maze_start_y = constrain(maze_start_y, 0, MAZE_GRID_H - 1);
+  if (maze_start_heading < MAZE_PATH_N || maze_start_heading > MAZE_PATH_W)
+    maze_start_heading = MAZE_PATH_N;
+
+  settings.begin("robot_pid", false);
+  settings.putString("mazeWalls", serializeMazeWalls());
+  settings.putString("mazePath", serializeMazePath());
+  settings.putInt("mazeSX", maze_start_x);
+  settings.putInt("mazeSY", maze_start_y);
+  settings.putInt("mazeHead", maze_start_heading);
+  settings.end();
+}
+
 const char index_html[] PROGMEM = R"rawliteral(
 <!DOCTYPE html><html><head>
 <meta name="viewport" content="width=device-width, initial-scale=1" charset="UTF-8">
@@ -179,6 +291,17 @@ const char index_html[] PROGMEM = R"rawliteral(
 
   #console { height: 35px; overflow-y: auto; font-size: 11px; color: #333; background: #ecf0f1; border: 1px solid #bdc3c7; padding: 3px; border-radius: 3px;}
   #chartCanvas { width: 100%; flex: 1; background: #fff; border: 1px solid #bdc3c7; margin-top: 3px; border-radius: 3px;}
+  select { width: 56px; padding: 3px; border: 1px solid #ccc; border-radius: 3px; font-weight: bold; }
+  .maze-tools { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 6px; }
+  .maze-tools .btn { padding: 6px 2px; margin-bottom: 0; background: #607d8b; }
+  .maze-tools .active { background: #2c3e50; box-shadow: inset 0 0 0 2px #fff; }
+  .maze-start { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 6px; }
+  .maze-grid { display: grid; grid-template-columns: repeat(16, minmax(18px, 1fr)); gap: 1px; background: #b0bec5; border: 1px solid #78909c; padding: 2px; margin-bottom: 6px; user-select: none; }
+  .maze-cell { aspect-ratio: 1 / 1; background: #fff; color: #263238; font-size: 10px; font-weight: bold; display: flex; align-items: center; justify-content: center; cursor: pointer; border: 1px solid #d7dde1; box-sizing: border-box; }
+  .maze-cell.start { background: #d5f5e3; }
+  .maze-cell.stop { background: #fadbd8; }
+  .maze-cell:hover { background: #e3f2fd; }
+  .maze-help { font-size: 10px; color: #546e7a; margin-bottom: 5px; }
 </style>
 </head><body>
   <div class="half-top">
@@ -281,6 +404,33 @@ const char index_html[] PROGMEM = R"rawliteral(
     </div>
     <button class="btn" style="background:#7f8c8d;" onclick="fetch('/cmd?val=BACK_ONE_CELL').then(r=>r.text())">LUI 1 O</button>
 
+    <div class="group">
+      <h4>MA TRAN DUONG DI 16x16</h4>
+      <div class="maze-help">O (0,0) nam o goc duoi-trai. Bam N/E/S/W de dat huong di tiep, X la dich/dung, . la xoa o. Wall N/E/S/W de bat/tat tuong cua o.</div>
+      <div class="maze-start">
+        <label>X0 <input type="number" id="maze_sx" min="0" max="15" value="0"></label>
+        <label>Y0 <input type="number" id="maze_sy" min="0" max="15" value="0"></label>
+        <label>Head <select id="maze_head"><option>N</option><option>E</option><option>S</option><option>W</option></select></label>
+      </div>
+      <div class="maze-tools">
+        <button class="btn maze-tool active" data-tool="N" onclick="setMazeTool('N')">N</button>
+        <button class="btn maze-tool" data-tool="E" onclick="setMazeTool('E')">E</button>
+        <button class="btn maze-tool" data-tool="S" onclick="setMazeTool('S')">S</button>
+        <button class="btn maze-tool" data-tool="W" onclick="setMazeTool('W')">W</button>
+        <button class="btn maze-tool" data-tool="X" onclick="setMazeTool('X')">X</button>
+        <button class="btn maze-tool" data-tool="." onclick="setMazeTool('.')">.</button>
+        <button class="btn maze-tool" data-tool="wallN" onclick="setMazeTool('wallN')">Wall N</button>
+        <button class="btn maze-tool" data-tool="wallE" onclick="setMazeTool('wallE')">Wall E</button>
+        <button class="btn maze-tool" data-tool="wallS" onclick="setMazeTool('wallS')">Wall S</button>
+        <button class="btn maze-tool" data-tool="wallW" onclick="setMazeTool('wallW')">Wall W</button>
+      </div>
+      <div id="mazeGrid" class="maze-grid"></div>
+      <div class="grid-2">
+        <button class="btn" style="background:#34495e;" onclick="saveMazeEditor()">LUU MA TRAN</button>
+        <button class="btn btn-run" style="background:#00a085;" onclick="fetch('/cmd?val=MATRIX_RUN')">CHAY MA TRAN</button>
+      </div>
+    </div>
+
     <div class="grid-btn">
       <button class="btn btn-run" onclick="fetch('/cmd?val=START')">CHAY LIEN TUC</button>
       <button class="btn btn-run" style="background:#27ae60;" onclick="fetch('/cmd?val=ONE_CELL')">DI THANG 1 O</button>
@@ -321,6 +471,118 @@ const char index_html[] PROGMEM = R"rawliteral(
     }
     paramsSynced = true;
   }
+
+  let mazeW = 16, mazeH = 16, mazeWalls = '', mazePath = '', mazeTool = 'N';
+  const wallBits = { W: 1, E: 2, S: 4, N: 8 };
+  const oppositeWall = { W: 'E', E: 'W', S: 'N', N: 'S' };
+  const pathDisplay = { N: '^', E: '>', S: 'v', W: '<', X: 'X', '.': '' };
+
+  function mazeIndex(x, y) { return y * mazeW + x; }
+  function replaceAt(str, idx, ch) { return str.substring(0, idx) + ch + str.substring(idx + 1); }
+  function wallNibble(idx) {
+    let n = parseInt(mazeWalls[idx] || '0', 16);
+    return isNaN(n) ? 0 : n;
+  }
+  function setWallNibble(idx, value) {
+    mazeWalls = replaceAt(mazeWalls, idx, (value & 15).toString(16).toUpperCase());
+  }
+  function normalizeMazeEditor() {
+    const cells = mazeW * mazeH;
+    if(mazeWalls.length !== cells) mazeWalls = '0'.repeat(cells);
+    if(mazePath.length !== cells) mazePath = '.'.repeat(cells);
+  }
+  function setMazeTool(tool) {
+    mazeTool = tool;
+    document.querySelectorAll('.maze-tool').forEach(btn => {
+      btn.classList.toggle('active', btn.dataset.tool === tool);
+    });
+  }
+  function neighborForWall(x, y, dir) {
+    if(dir === 'N') return [x, y + 1];
+    if(dir === 'E') return [x + 1, y];
+    if(dir === 'S') return [x, y - 1];
+    return [x - 1, y];
+  }
+  function toggleMazeWall(x, y, dir) {
+    const idx = mazeIndex(x, y);
+    const bit = wallBits[dir];
+    const nextValue = wallNibble(idx) ^ bit;
+    setWallNibble(idx, nextValue);
+
+    const [nx, ny] = neighborForWall(x, y, dir);
+    if(nx >= 0 && nx < mazeW && ny >= 0 && ny < mazeH) {
+      const nidx = mazeIndex(nx, ny);
+      setWallNibble(nidx, wallNibble(nidx) ^ wallBits[oppositeWall[dir]]);
+    }
+  }
+  function clickMazeCell(x, y) {
+    normalizeMazeEditor();
+    if(mazeTool.startsWith('wall')) {
+      toggleMazeWall(x, y, mazeTool.substring(4));
+    } else {
+      mazePath = replaceAt(mazePath, mazeIndex(x, y), mazeTool);
+    }
+    renderMazeGrid();
+  }
+  function renderMazeGrid() {
+    normalizeMazeEditor();
+    const grid = document.getElementById('mazeGrid');
+    if(!grid) return;
+    grid.innerHTML = '';
+    const sx = parseInt(document.getElementById('maze_sx').value || '0', 10);
+    const sy = parseInt(document.getElementById('maze_sy').value || '0', 10);
+    for(let y = mazeH - 1; y >= 0; y--) {
+      for(let x = 0; x < mazeW; x++) {
+        const idx = mazeIndex(x, y);
+        const cell = document.createElement('div');
+        const walls = wallNibble(idx);
+        const p = mazePath[idx] || '.';
+        cell.className = 'maze-cell';
+        if(x === sx && y === sy) cell.classList.add('start');
+        if(p === 'X') cell.classList.add('stop');
+        cell.textContent = pathDisplay[p] || '';
+        cell.title = `(${x},${y}) path=${p} walls=${mazeWalls[idx] || '0'}`;
+        cell.style.borderLeftWidth = (walls & wallBits.W) ? '3px' : '1px';
+        cell.style.borderRightWidth = (walls & wallBits.E) ? '3px' : '1px';
+        cell.style.borderBottomWidth = (walls & wallBits.S) ? '3px' : '1px';
+        cell.style.borderTopWidth = (walls & wallBits.N) ? '3px' : '1px';
+        cell.style.borderLeftColor = (walls & wallBits.W) ? '#263238' : '#d7dde1';
+        cell.style.borderRightColor = (walls & wallBits.E) ? '#263238' : '#d7dde1';
+        cell.style.borderBottomColor = (walls & wallBits.S) ? '#263238' : '#d7dde1';
+        cell.style.borderTopColor = (walls & wallBits.N) ? '#263238' : '#d7dde1';
+        cell.onclick = () => clickMazeCell(x, y);
+        grid.appendChild(cell);
+      }
+    }
+  }
+  function loadMazeEditor() {
+    fetch('/mazeData').then(r => r.json()).then(d => {
+      mazeW = d.w || 16; mazeH = d.h || 16;
+      mazeWalls = d.walls || ''; mazePath = d.path || '';
+      document.getElementById('maze_sx').value = d.sx || 0;
+      document.getElementById('maze_sy').value = d.sy || 0;
+      document.getElementById('maze_head').value = d.head || 'N';
+      normalizeMazeEditor();
+      renderMazeGrid();
+    }).catch(e => {
+      normalizeMazeEditor();
+      renderMazeGrid();
+    });
+  }
+  function saveMazeEditor() {
+    normalizeMazeEditor();
+    const sx = encodeURIComponent(document.getElementById('maze_sx').value);
+    const sy = encodeURIComponent(document.getElementById('maze_sy').value);
+    const head = encodeURIComponent(document.getElementById('maze_head').value);
+    fetch(`/mazeSet?walls=${mazeWalls}&path=${mazePath}&sx=${sx}&sy=${sy}&head=${head}`)
+      .then(r => r.text().then(text => {
+        document.getElementById('console').innerHTML = text;
+        if(!r.ok) alert(text);
+        return text;
+      }));
+  }
+  document.getElementById('maze_sx').addEventListener('change', renderMazeGrid);
+  document.getElementById('maze_sy').addEventListener('change', renderMazeGrid);
 
   function drawChart() {
     if(canvas.width === 0) resizeCanvas();
@@ -447,12 +709,13 @@ const char index_html[] PROGMEM = R"rawliteral(
           let spdR = lastViewEncR === null ? 0 : Math.abs(d.encR - lastViewEncR);
           lastViewEncL = d.encL; lastViewEncR = d.encR;
 
-          document.getElementById('console').innerHTML = `<span style="color:#c0392b; font-weight:bold;">ENC_L:</span> ${d.encL} | <span style="color:#2c3e50; font-weight:bold;">ENC_R:</span> ${d.encR} | SPD: ${spdL}/${spdR} | PWM: ${d.pwmL}/${d.pwmR} | YAW: ${d.yaw.toFixed(2)} / ${d.targetYaw.toFixed(2)} e${d.yawErr.toFixed(2)} | GZ: ${d.gyroZCorr.toFixed(3)} dps (${d.yawDriftDpm.toFixed(1)} dpm) | SIDE: FL ${d.irFL}/${d.sideFL} e${d.errFL} - FR ${d.irFR}/${d.sideFR} e${d.errFR} | STEER: ${d.steerIR}/${d.totalSteer} | STATE: ${d.state}`;
+          document.getElementById('console').innerHTML = `<span style="color:#c0392b; font-weight:bold;">ENC_L:</span> ${d.encL} | <span style="color:#2c3e50; font-weight:bold;">ENC_R:</span> ${d.encR} | SPD: ${spdL}/${spdR} | PWM: ${d.pwmL}/${d.pwmR} | CELL: ${d.mazeX},${d.mazeY} h${d.mazeHead} n${d.mazeNext} | YAW: ${d.yaw.toFixed(2)} / ${d.targetYaw.toFixed(2)} e${d.yawErr.toFixed(2)} | GZ: ${d.gyroZCorr.toFixed(3)} dps (${d.yawDriftDpm.toFixed(1)} dpm) | SIDE: FL ${d.irFL}/${d.sideFL} e${d.errFL} - FR ${d.irFR}/${d.sideFR} e${d.errFR} | STEER: ${d.steerIR}/${d.totalSteer} | STATE: ${d.state}`;
           
           setTimeout(fetchLoop, 100); 
         }).catch(e => { setTimeout(fetchLoop, 500); });
     } else { setTimeout(fetchLoop, 100); }
   }
+  loadMazeEditor();
   fetchLoop();
 </script>
 </body></html>
@@ -548,6 +811,9 @@ void handleCmd() {
     } else if (command == "MAZE_RIGHT_CELL") {
       requestedState = MAZE_RIGHT_HAND_CELL;
       stateChangeRequested = true;
+    } else if (command == "MATRIX_RUN") {
+      requestedState = MAZE_MATRIX_RUN;
+      stateChangeRequested = true;
     } else if (command == "STOP") {
       requestedState = IDLE;
       stateChangeRequested = true;
@@ -584,6 +850,57 @@ void handleImuRezero() {
   }
 }
 
+void handleMazeData() {
+  String walls = serializeMazeWalls();
+  String path = serializeMazePath();
+  String json;
+  json.reserve(MAZE_GRID_CELLS * 2 + 180);
+  json += "{\"w\":";
+  json += MAZE_GRID_W;
+  json += ",\"h\":";
+  json += MAZE_GRID_H;
+  json += ",\"walls\":\"";
+  json += walls;
+  json += "\",\"path\":\"";
+  json += path;
+  json += "\",\"sx\":";
+  json += maze_start_x;
+  json += ",\"sy\":";
+  json += maze_start_y;
+  json += ",\"head\":\"";
+  json += pathValueToChar((uint8_t)maze_start_heading);
+  json += "\",\"x\":";
+  json += debugMazeX;
+  json += ",\"y\":";
+  json += debugMazeY;
+  json += ",\"heading\":";
+  json += debugMazeHeading;
+  json += ",\"next\":";
+  json += debugMazeNextDir;
+  json += "}";
+  server.send(200, "application/json", json);
+}
+
+void handleMazeSet() {
+  if (isRunning) {
+    server.send(409, "text/plain", "Hay dung xe truoc khi luu ma tran.");
+    return;
+  }
+
+  if (server.hasArg("walls") && server.hasArg("path")) {
+    applyMazeStrings(server.arg("walls"), server.arg("path"));
+  }
+  if (server.hasArg("sx"))
+    maze_start_x = server.arg("sx").toInt();
+  if (server.hasArg("sy"))
+    maze_start_y = server.arg("sy").toInt();
+  if (server.hasArg("head") && server.arg("head").length() > 0)
+    maze_start_heading = pathCharToValue(server.arg("head")[0]);
+
+  saveMazeConfig();
+  server.send(200, "text/plain", "Da luu ma tran duong di.");
+}
+
 void handleData() {
   IrSnapshot liveIr = latestRawIrSnapshot();
   float liveYaw = continuousYaw;
@@ -597,12 +914,13 @@ void handleData() {
   int liveAutoBias = debugGyroZAutoBiasActive;
   uint32_t liveAutoBiasMs = debugGyroZAutoBiasStillMs;
   int liveAutoBiasReason = debugGyroZAutoBiasReason;
-  char jsonBuf[2300];
+  char jsonBuf[2400];
   snprintf(jsonBuf, sizeof(jsonBuf),
            "{\"irL\":%d,\"irFL\":%d,\"irFR\":%d,\"irR\":%d,"
            "\"dL\":%d,\"dFL\":%d,\"dFR\":%d,\"dR\":%d,"
            "\"encL\":%ld,\"encR\":%ld,"
            "\"pwmL\":%d,\"pwmR\":%d,\"state\":%d,"
+           "\"mazeX\":%d,\"mazeY\":%d,\"mazeHead\":%d,\"mazeNext\":%d,"
            "\"yaw\":%.2f,\"targetYaw\":%.2f,\"yawErr\":%.2f,"
            "\"gyroZRaw\":%.3f,\"gyroZCorr\":%.3f,\"gyroZBias\":%.3f,"
            "\"mpuTemp\":%.2f,\"yawDriftDpm\":%.2f,"
@@ -626,7 +944,8 @@ void handleData() {
            liveIr.frontLeft - min_IR[SIDX(S_FL)],
            liveIr.frontRight - min_IR[SIDX(S_FR)],
            liveIr.right - min_IR[SIDX(S_R)], pulseL, pulseR, pwmL, pwmR,
-           (int)carState, liveYaw, liveTargetYaw, liveYawErr,
+           (int)carState, debugMazeX, debugMazeY, debugMazeHeading,
+           debugMazeNextDir, liveYaw, liveTargetYaw, liveYawErr,
            liveGyroZRaw, liveGyroZCorr, liveGyroZBias, liveMpuTemp,
            liveYawDriftDpm, liveAutoBias, (unsigned long)liveAutoBiasMs,
            liveAutoBiasReason,
@@ -654,6 +973,7 @@ void webTask(void *pvParameters) {
 
 void setupWebServer() {
   loadRuntimeParams();
+  loadMazeConfig();
   WiFi.disconnect(true);
   delay(100);
   WiFi.mode(WIFI_AP);
@@ -668,6 +988,8 @@ void setupWebServer() {
   server.on("/calibCenter", handleCalibCenter);
   server.on("/cmd", handleCmd);
   server.on("/imuRezero", handleImuRezero);
+  server.on("/mazeData", handleMazeData);
+  server.on("/mazeSet", handleMazeSet);
   server.on("/data", handleData);
 
   server.onNotFound([]() {
