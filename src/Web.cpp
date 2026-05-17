@@ -12,6 +12,8 @@ const byte DNS_PORT = 53;
 DNSServer dnsServer;
 WebServer server(80);
 Preferences settings;
+volatile bool mazeConfigSaveRequested = false;
+uint32_t lastMazeConfigSaveMs = 0;
 const char *ssid = "ROBOT_VANG_100";
 const char *password = "chaydiemmuoi";
 
@@ -217,6 +219,50 @@ String serializeMazePath() {
   return out;
 }
 
+String serializeMazeByteMap(const uint8_t map[MAZE_GRID_W][MAZE_GRID_H]) {
+  String out;
+  out.reserve(MAZE_GRID_CELLS * 2);
+  for (int y = 0; y < MAZE_GRID_H; y++) {
+    for (int x = 0; x < MAZE_GRID_W; x++) {
+      uint8_t value = map[x][y];
+      out += nibbleToHex(value >> 4);
+      out += nibbleToHex(value);
+    }
+  }
+  return out;
+}
+
+String serializeMazeDist() {
+  String out;
+  out.reserve(MAZE_GRID_CELLS * 2);
+  for (int y = 0; y < MAZE_GRID_H; y++) {
+    for (int x = 0; x < MAZE_GRID_W; x++) {
+      uint8_t value =
+          (maze_dist_map[x][y] == MAZE_FLOOD_UNREACHABLE)
+              ? 0xFF
+              : (uint8_t)min((int)maze_dist_map[x][y], 254);
+      out += nibbleToHex(value >> 4);
+      out += nibbleToHex(value);
+    }
+  }
+  return out;
+}
+
+void applyMazeByteString(const String &data,
+                         uint8_t map[MAZE_GRID_W][MAZE_GRID_H]) {
+  for (int y = 0; y < MAZE_GRID_H; y++) {
+    for (int x = 0; x < MAZE_GRID_W; x++) {
+      int idx = (y * MAZE_GRID_W + x) * 2;
+      if (idx + 1 < data.length()) {
+        map[x][y] = (uint8_t)((hexToNibble(data[idx]) << 4) |
+                              hexToNibble(data[idx + 1]));
+      } else {
+        map[x][y] = 0;
+      }
+    }
+  }
+}
+
 void applyMazeStrings(const String &walls, const String &path) {
   for (int y = 0; y < MAZE_GRID_H; y++) {
     for (int x = 0; x < MAZE_GRID_W; x++) {
@@ -233,32 +279,52 @@ void loadMazeConfig() {
   resetMazeMaps();
   settings.begin("robot_pid", true);
   String walls = settings.getString("mazeWalls", "");
+  String known = settings.getString("mazeKnown", "");
   String path = settings.getString("mazePath", "");
+  String visits = settings.getString("mazeVisits", "");
   maze_start_x = settings.getInt("mazeSX", maze_start_x);
   maze_start_y = settings.getInt("mazeSY", maze_start_y);
   maze_start_heading = settings.getInt("mazeHead", maze_start_heading);
+  maze_goal_x = settings.getInt("mazeGX", maze_goal_x);
+  maze_goal_y = settings.getInt("mazeGY", maze_goal_y);
   settings.end();
 
   maze_start_x = constrain(maze_start_x, 0, MAZE_GRID_W - 1);
   maze_start_y = constrain(maze_start_y, 0, MAZE_GRID_H - 1);
+  maze_goal_x = constrain(maze_goal_x, 0, MAZE_GRID_W - 1);
+  maze_goal_y = constrain(maze_goal_y, 0, MAZE_GRID_H - 1);
   if (maze_start_heading < MAZE_PATH_N || maze_start_heading > MAZE_PATH_W)
     maze_start_heading = MAZE_PATH_N;
   applyMazeStrings(walls, path);
+  if (known.length() > 0)
+    applyMazeByteString(known, maze_known_map);
+  if (visits.length() > 0)
+    applyMazeByteString(visits, maze_visit_count);
 }
 
 void saveMazeConfig() {
   maze_start_x = constrain(maze_start_x, 0, MAZE_GRID_W - 1);
   maze_start_y = constrain(maze_start_y, 0, MAZE_GRID_H - 1);
+  maze_goal_x = constrain(maze_goal_x, 0, MAZE_GRID_W - 1);
+  maze_goal_y = constrain(maze_goal_y, 0, MAZE_GRID_H - 1);
   if (maze_start_heading < MAZE_PATH_N || maze_start_heading > MAZE_PATH_W)
     maze_start_heading = MAZE_PATH_N;
 
   settings.begin("robot_pid", false);
   settings.putString("mazeWalls", serializeMazeWalls());
+  settings.putString("mazeKnown", serializeMazeByteMap(maze_known_map));
   settings.putString("mazePath", serializeMazePath());
+  settings.putString("mazeVisits", serializeMazeByteMap(maze_visit_count));
   settings.putInt("mazeSX", maze_start_x);
   settings.putInt("mazeSY", maze_start_y);
   settings.putInt("mazeHead", maze_start_heading);
+  settings.putInt("mazeGX", maze_goal_x);
+  settings.putInt("mazeGY", maze_goal_y);
   settings.end();
+}
+
+void requestMazeConfigSave() {
+  mazeConfigSaveRequested = true;
 }
 
 const char index_html[] PROGMEM = R"rawliteral(
@@ -295,11 +361,14 @@ const char index_html[] PROGMEM = R"rawliteral(
   .maze-tools { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px; margin-bottom: 6px; }
   .maze-tools .btn { padding: 6px 2px; margin-bottom: 0; background: #607d8b; }
   .maze-tools .active { background: #2c3e50; box-shadow: inset 0 0 0 2px #fff; }
-  .maze-start { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 6px; }
+  .maze-start { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin-bottom: 6px; }
   .maze-grid { display: grid; grid-template-columns: repeat(16, minmax(18px, 1fr)); gap: 1px; background: #b0bec5; border: 1px solid #78909c; padding: 2px; margin-bottom: 6px; user-select: none; }
   .maze-cell { aspect-ratio: 1 / 1; background: #fff; color: #263238; font-size: 10px; font-weight: bold; display: flex; align-items: center; justify-content: center; cursor: pointer; border: 1px solid #d7dde1; box-sizing: border-box; }
   .maze-cell.start { background: #d5f5e3; }
+  .maze-cell.goal { background: #fadbd8; }
+  .maze-cell.visited { background: #d6eaf8; }
   .maze-cell.stop { background: #fadbd8; }
+  .maze-cell.current { background: #2ecc71; color: #fff; }
   .maze-cell:hover { background: #e3f2fd; }
   .maze-help { font-size: 10px; color: #546e7a; margin-bottom: 5px; }
 </style>
@@ -338,6 +407,18 @@ const char index_html[] PROGMEM = R"rawliteral(
           <div class="val-item">AB Reason: <span id="auto_bias_reason" class="delta">WAIT</span></div>
         </div>
         <button class="btn" style="background:#2c3e50;" onclick="rezeroMpu()">REZERO MPU</button>
+        <h4>MAP SENSOR DEBUG</h4>
+        <div class="val-box">
+          <div class="val-item">Src: <span id="map_src" class="raw">IDLE</span></div>
+          <div class="val-item">Cell: <span id="map_cell" class="raw">-,-</span></div>
+          <div class="val-item">Next: <span id="map_next" class="raw">-</span></div>
+          <div class="val-item">Left: <span id="map_left" class="delta">UNKNOWN</span></div>
+          <div class="val-item">Dir: <span id="map_left_dir" class="raw">-</span></div>
+          <div class="val-item">Front: <span id="map_front" class="delta">UNKNOWN</span></div>
+          <div class="val-item">Dir: <span id="map_front_dir" class="raw">-</span></div>
+          <div class="val-item">Right: <span id="map_right" class="delta">UNKNOWN</span></div>
+          <div class="val-item">Dir: <span id="map_right_dir" class="raw">-</span></div>
+        </div>
       </div>
     </div>
 
@@ -373,12 +454,12 @@ const char index_html[] PROGMEM = R"rawliteral(
         <label>Gyro <input type="number" id="gyro" step="0.1" value="6.0"></label>
         <label>PWM Min <input type="number" id="pwm_min" step="1" value="35"></label>
         <label>PWM Max <input type="number" id="pwm_max" step="1" value="100"></label>
-        <label>Xung/20cm <input type="number" id="xung_o" step="1" value="980"></label>
+        <label>Xung Tien 1 O <input type="number" id="xung_o" step="1" value="980"></label>
         <label>Front Margin <input type="number" id="front_margin" step="1" value="800"></label>
         <label>Tre Re <input type="number" id="turn_late" step="1" value="120"></label>
         <label>Goc Re <input type="number" id="turn_deg" step="1" value="78"></label>
         <label>Lui Sau Re <input type="number" id="turn_back" step="1" value="80"></label>
-        <label>Lui Ngo Cut <input type="number" id="dead_back" step="1" value="980"></label>
+        <label>Xung Lui 1 O <input type="number" id="dead_back" step="1" value="980"></label>
         <label>PWM Lui <input type="number" id="backup_pwm" step="1" value="55"></label>
       </div>
     </div>
@@ -402,6 +483,7 @@ const char index_html[] PROGMEM = R"rawliteral(
       <button class="btn" style="background:#6c3483;" onclick="fetch('/cmd?val=TEST_TURN_L').then(r=>r.text())">TEST QUAY TRAI</button>
       <button class="btn" style="background:#ba4a00;" onclick="fetch('/cmd?val=TEST_TURN_R').then(r=>r.text())">TEST QUAY PHAI</button>
     </div>
+    <button class="btn" style="background:#b7950b;" onclick="fetch('/cmd?val=TEST_TURN_180').then(r=>r.text())">TEST QUAY 180</button>
     <button class="btn" style="background:#7f8c8d;" onclick="fetch('/cmd?val=BACK_ONE_CELL').then(r=>r.text())">LUI 1 O</button>
 
     <div class="group">
@@ -411,6 +493,8 @@ const char index_html[] PROGMEM = R"rawliteral(
         <label>X0 <input type="number" id="maze_sx" min="0" max="15" value="0"></label>
         <label>Y0 <input type="number" id="maze_sy" min="0" max="15" value="0"></label>
         <label>Head <select id="maze_head"><option>N</option><option>E</option><option>S</option><option>W</option></select></label>
+        <label>GX <input type="number" id="maze_gx" min="0" max="15" value="8"></label>
+        <label>GY <input type="number" id="maze_gy" min="0" max="15" value="8"></label>
       </div>
       <div class="maze-tools">
         <button class="btn maze-tool active" data-tool="N" onclick="setMazeTool('N')">N</button>
@@ -428,6 +512,9 @@ const char index_html[] PROGMEM = R"rawliteral(
       <div class="grid-2">
         <button class="btn" style="background:#34495e;" onclick="saveMazeEditor()">LUU MA TRAN</button>
         <button class="btn btn-run" style="background:#00a085;" onclick="fetch('/cmd?val=MATRIX_RUN')">CHAY MA TRAN</button>
+        <button class="btn" style="background:#c0392b;" onclick="clearLearnedMaze()">XOA MAP HOC</button>
+        <button class="btn btn-run" style="background:#f1c40f;color:#2c3e50;" onclick="startFloodRun()">TIM DUONG TOI DICH</button>
+        <button class="btn" style="background:#16a085;" onclick="startMapSensorDebug()">MAP SENSOR DEBUG</button>
       </div>
     </div>
 
@@ -472,7 +559,9 @@ const char index_html[] PROGMEM = R"rawliteral(
     paramsSynced = true;
   }
 
-  let mazeW = 16, mazeH = 16, mazeWalls = '', mazePath = '', mazeTool = 'N';
+  let mazeW = 16, mazeH = 16, mazeWalls = '', mazeKnown = '', mazePath = '';
+  let mazeVisits = '', mazeDist = '', mazeTool = 'N', mazeEditorDirty = false;
+  let mazeCurrentX = -1, mazeCurrentY = -1, lastMazeLiveRefresh = 0;
   const wallBits = { W: 1, E: 2, S: 4, N: 8 };
   const oppositeWall = { W: 'E', E: 'W', S: 'N', N: 'S' };
   const pathDisplay = { N: '^', E: '>', S: 'v', W: '<', X: 'X', '.': '' };
@@ -483,13 +572,21 @@ const char index_html[] PROGMEM = R"rawliteral(
     let n = parseInt(mazeWalls[idx] || '0', 16);
     return isNaN(n) ? 0 : n;
   }
+  function bytePair(str, idx) {
+    const p = idx * 2;
+    const n = parseInt((str[p] || '0') + (str[p + 1] || '0'), 16);
+    return isNaN(n) ? 0 : n;
+  }
   function setWallNibble(idx, value) {
     mazeWalls = replaceAt(mazeWalls, idx, (value & 15).toString(16).toUpperCase());
   }
   function normalizeMazeEditor() {
     const cells = mazeW * mazeH;
     if(mazeWalls.length !== cells) mazeWalls = '0'.repeat(cells);
+    if(mazeKnown.length !== cells * 2) mazeKnown = '00'.repeat(cells);
     if(mazePath.length !== cells) mazePath = '.'.repeat(cells);
+    if(mazeVisits.length !== cells * 2) mazeVisits = '00'.repeat(cells);
+    if(mazeDist.length !== cells * 2) mazeDist = 'FF'.repeat(cells);
   }
   function setMazeTool(tool) {
     mazeTool = tool;
@@ -522,6 +619,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     } else {
       mazePath = replaceAt(mazePath, mazeIndex(x, y), mazeTool);
     }
+    mazeEditorDirty = true;
     renderMazeGrid();
   }
   function renderMazeGrid() {
@@ -531,39 +629,54 @@ const char index_html[] PROGMEM = R"rawliteral(
     grid.innerHTML = '';
     const sx = parseInt(document.getElementById('maze_sx').value || '0', 10);
     const sy = parseInt(document.getElementById('maze_sy').value || '0', 10);
+    const gx = parseInt(document.getElementById('maze_gx').value || '8', 10);
+    const gy = parseInt(document.getElementById('maze_gy').value || '8', 10);
     for(let y = mazeH - 1; y >= 0; y--) {
       for(let x = 0; x < mazeW; x++) {
         const idx = mazeIndex(x, y);
         const cell = document.createElement('div');
         const walls = wallNibble(idx);
+        const known = bytePair(mazeKnown, idx);
+        const visits = bytePair(mazeVisits, idx);
+        const dist = bytePair(mazeDist, idx);
         const p = mazePath[idx] || '.';
         cell.className = 'maze-cell';
+        if(visits > 0) cell.classList.add('visited');
         if(x === sx && y === sy) cell.classList.add('start');
+        if(x === gx && y === gy) cell.classList.add('goal');
+        if(x === mazeCurrentX && y === mazeCurrentY) cell.classList.add('current');
         if(p === 'X') cell.classList.add('stop');
-        cell.textContent = pathDisplay[p] || '';
-        cell.title = `(${x},${y}) path=${p} walls=${mazeWalls[idx] || '0'}`;
+        cell.textContent = pathDisplay[p] || ((dist < 255) ? String(dist) : '');
+        cell.title = `(${x},${y}) path=${p} walls=${mazeWalls[idx] || '0'} known=${known.toString(16)} visit=${visits} dist=${dist}`;
         cell.style.borderLeftWidth = (walls & wallBits.W) ? '3px' : '1px';
         cell.style.borderRightWidth = (walls & wallBits.E) ? '3px' : '1px';
         cell.style.borderBottomWidth = (walls & wallBits.S) ? '3px' : '1px';
         cell.style.borderTopWidth = (walls & wallBits.N) ? '3px' : '1px';
-        cell.style.borderLeftColor = (walls & wallBits.W) ? '#263238' : '#d7dde1';
-        cell.style.borderRightColor = (walls & wallBits.E) ? '#263238' : '#d7dde1';
-        cell.style.borderBottomColor = (walls & wallBits.S) ? '#263238' : '#d7dde1';
-        cell.style.borderTopColor = (walls & wallBits.N) ? '#263238' : '#d7dde1';
+        cell.style.borderLeftColor = (walls & wallBits.W) ? '#263238' : ((known & wallBits.W) ? '#aeb6bf' : '#eef2f4');
+        cell.style.borderRightColor = (walls & wallBits.E) ? '#263238' : ((known & wallBits.E) ? '#aeb6bf' : '#eef2f4');
+        cell.style.borderBottomColor = (walls & wallBits.S) ? '#263238' : ((known & wallBits.S) ? '#aeb6bf' : '#eef2f4');
+        cell.style.borderTopColor = (walls & wallBits.N) ? '#263238' : ((known & wallBits.N) ? '#aeb6bf' : '#eef2f4');
         cell.onclick = () => clickMazeCell(x, y);
         grid.appendChild(cell);
       }
     }
   }
-  function loadMazeEditor() {
+  function loadMazeEditor(force=false) {
+    if(mazeEditorDirty && !force) return;
     fetch('/mazeData').then(r => r.json()).then(d => {
       mazeW = d.w || 16; mazeH = d.h || 16;
-      mazeWalls = d.walls || ''; mazePath = d.path || '';
+      mazeWalls = d.walls || ''; mazeKnown = d.known || '';
+      mazePath = d.path || ''; mazeVisits = d.visits || ''; mazeDist = d.dist || '';
+      mazeCurrentX = Number.isInteger(d.x) ? d.x : -1;
+      mazeCurrentY = Number.isInteger(d.y) ? d.y : -1;
       document.getElementById('maze_sx').value = d.sx || 0;
       document.getElementById('maze_sy').value = d.sy || 0;
+      document.getElementById('maze_gx').value = (d.gx !== undefined) ? d.gx : 8;
+      document.getElementById('maze_gy').value = (d.gy !== undefined) ? d.gy : 8;
       document.getElementById('maze_head').value = d.head || 'N';
       normalizeMazeEditor();
       renderMazeGrid();
+      mazeEditorDirty = false;
     }).catch(e => {
       normalizeMazeEditor();
       renderMazeGrid();
@@ -573,16 +686,44 @@ const char index_html[] PROGMEM = R"rawliteral(
     normalizeMazeEditor();
     const sx = encodeURIComponent(document.getElementById('maze_sx').value);
     const sy = encodeURIComponent(document.getElementById('maze_sy').value);
+    const gx = encodeURIComponent(document.getElementById('maze_gx').value);
+    const gy = encodeURIComponent(document.getElementById('maze_gy').value);
     const head = encodeURIComponent(document.getElementById('maze_head').value);
-    fetch(`/mazeSet?walls=${mazeWalls}&path=${mazePath}&sx=${sx}&sy=${sy}&head=${head}`)
+    return fetch(`/mazeSet?walls=${mazeWalls}&known=${mazeKnown}&path=${mazePath}&visits=${mazeVisits}&sx=${sx}&sy=${sy}&gx=${gx}&gy=${gy}&head=${head}`)
       .then(r => r.text().then(text => {
         document.getElementById('console').innerHTML = text;
         if(!r.ok) alert(text);
-        return text;
+        else mazeEditorDirty = false;
+        return r.ok;
       }));
+  }
+  function clearLearnedMaze() {
+    const sx = encodeURIComponent(document.getElementById('maze_sx').value);
+    const sy = encodeURIComponent(document.getElementById('maze_sy').value);
+    const gx = encodeURIComponent(document.getElementById('maze_gx').value);
+    const gy = encodeURIComponent(document.getElementById('maze_gy').value);
+    const head = encodeURIComponent(document.getElementById('maze_head').value);
+    fetch(`/mazeClear?sx=${sx}&sy=${sy}&gx=${gx}&gy=${gy}&head=${head}`)
+      .then(r => r.text().then(text => {
+        document.getElementById('console').innerHTML = text;
+        mazeEditorDirty = false;
+        loadMazeEditor(true);
+      }));
+  }
+  function startFloodRun() {
+    saveMazeEditor().then(ok => {
+      if(ok) fetch('/cmd?val=FLOOD_RUN');
+    });
+  }
+  function startMapSensorDebug() {
+    saveMazeEditor().then(ok => {
+      if(ok) fetch('/cmd?val=MAP_SENSOR_DEBUG');
+    });
   }
   document.getElementById('maze_sx').addEventListener('change', renderMazeGrid);
   document.getElementById('maze_sy').addEventListener('change', renderMazeGrid);
+  document.getElementById('maze_gx').addEventListener('change', renderMazeGrid);
+  document.getElementById('maze_gy').addEventListener('change', renderMazeGrid);
 
   function drawChart() {
     if(canvas.width === 0) resizeCanvas();
@@ -672,6 +813,34 @@ const char index_html[] PROGMEM = R"rawliteral(
       .catch(err => alert("MPU rezero failed"));
   }
 
+  function dirLabel(dir) {
+    return ['N', 'E', 'S', 'W'][dir] || '-';
+  }
+  function wallLabel(known, wall) {
+    if(!known) return 'UNKNOWN';
+    return wall ? 'WALL' : 'OPEN';
+  }
+  function sourceLabel(src) {
+    if(src === 1) return 'CENTER';
+    if(src === 2) return 'DRIVE';
+    if(src === 3) return 'DEBUG';
+    return 'IDLE';
+  }
+  function decisionLabel(d) {
+    const dir = dirLabel(d.mazeNext);
+    if(dir === '-') return '-';
+    if(d.mapSrc === 3 && d.totalSteer === 2) return `FWD -> ${dir} / RIGHT`;
+    if(d.mapSrc === 3 && d.totalSteer === -3) return `FWD -> ${dir} / LEFT`;
+    if(d.mapSrc === 3 && d.totalSteer === 1) return `${dir} / TURN RIGHT`;
+    if(d.mapSrc === 3 && d.totalSteer === -1) return `${dir} / TURN LEFT`;
+    if(d.mapSrc === 3 && d.totalSteer === -2) return `${dir} / BACK`;
+    if(d.mazeNext === ((d.mazeHead + 1) % 4)) return `${dir} / RIGHT`;
+    if(d.mazeNext === d.mazeHead) return `${dir} / STRAIGHT`;
+    if(d.mazeNext === ((d.mazeHead + 3) % 4)) return `${dir} / LEFT`;
+    if(d.mazeNext === ((d.mazeHead + 2) % 4)) return `${dir} / BACK`;
+    return dir;
+  }
+
   let isPaused = false;
   
   function fetchLoop() {
@@ -704,12 +873,27 @@ const char index_html[] PROGMEM = R"rawliteral(
           document.getElementById('auto_bias_ms').innerText = d.autoBiasMs;
           const abReasons = ['ON', 'WAIT', 'STATE', 'PWM', 'ENC', 'GYRO'];
           document.getElementById('auto_bias_reason').innerText = abReasons[d.autoBiasReason] || 'UNKNOWN';
+          document.getElementById('map_src').innerText = sourceLabel(d.mapSrc);
+          document.getElementById('map_cell').innerText = `${d.mazeX},${d.mazeY}`;
+          document.getElementById('map_next').innerText = decisionLabel(d);
+          document.getElementById('map_left').innerText = wallLabel(d.mapLK, d.mapLW);
+          document.getElementById('map_front').innerText = wallLabel(d.mapFK, d.mapFW);
+          document.getElementById('map_right').innerText = wallLabel(d.mapRK, d.mapRW);
+          document.getElementById('map_left_dir').innerText = dirLabel(d.mapLD);
+          document.getElementById('map_front_dir').innerText = dirLabel(d.mapFD);
+          document.getElementById('map_right_dir').innerText = dirLabel(d.mapRD);
 
           let spdL = lastViewEncL === null ? 0 : Math.abs(d.encL - lastViewEncL);
           let spdR = lastViewEncR === null ? 0 : Math.abs(d.encR - lastViewEncR);
           lastViewEncL = d.encL; lastViewEncR = d.encR;
 
-          document.getElementById('console').innerHTML = `<span style="color:#c0392b; font-weight:bold;">ENC_L:</span> ${d.encL} | <span style="color:#2c3e50; font-weight:bold;">ENC_R:</span> ${d.encR} | SPD: ${spdL}/${spdR} | PWM: ${d.pwmL}/${d.pwmR} | CELL: ${d.mazeX},${d.mazeY} h${d.mazeHead} n${d.mazeNext} | YAW: ${d.yaw.toFixed(2)} / ${d.targetYaw.toFixed(2)} e${d.yawErr.toFixed(2)} | GZ: ${d.gyroZCorr.toFixed(3)} dps (${d.yawDriftDpm.toFixed(1)} dpm) | SIDE: FL ${d.irFL}/${d.sideFL} e${d.errFL} - FR ${d.irFR}/${d.sideFR} e${d.errFR} | STEER: ${d.steerIR}/${d.totalSteer} | STATE: ${d.state}`;
+          document.getElementById('console').innerHTML = `<span style="color:#c0392b; font-weight:bold;">ENC_L:</span> ${d.encL} | <span style="color:#2c3e50; font-weight:bold;">ENC_R:</span> ${d.encR} | SPD: ${spdL}/${spdR} | PWM: ${d.pwmL}/${d.pwmR} | CELL: ${d.mazeX},${d.mazeY} h${d.mazeHead} n${d.mazeNext} | YAW: ${d.yaw.toFixed(2)} / ${d.targetYaw.toFixed(2)} e${d.yawErr.toFixed(2)} | GZ: ${d.gyroZCorr.toFixed(3)} dps (${d.yawDriftDpm.toFixed(1)} dpm) | SIDE: FL ${d.irFL}/${d.sideFL} e${d.errFL} - FR ${d.irFR}/${d.sideFR} e${d.errFR} | STEER: ${d.steerIR}/${d.totalSteer} | LOOP: ${d.loopMs}ms o${d.overruns} | STATE: ${d.state}`;
+
+          if(d.floodRun && Date.now() - lastMazeLiveRefresh > 800) {
+            lastMazeLiveRefresh = Date.now();
+            mazeEditorDirty = false;
+            loadMazeEditor(true);
+          }
           
           setTimeout(fetchLoop, 100); 
         }).catch(e => { setTimeout(fetchLoop, 500); });
@@ -814,6 +998,9 @@ void handleCmd() {
     } else if (command == "MATRIX_RUN") {
       requestedState = MAZE_MATRIX_RUN;
       stateChangeRequested = true;
+    } else if (command == "FLOOD_RUN") {
+      requestedState = MAZE_FLOOD_RUN;
+      stateChangeRequested = true;
     } else if (command == "STOP") {
       requestedState = IDLE;
       stateChangeRequested = true;
@@ -829,8 +1016,14 @@ void handleCmd() {
     } else if (command == "TEST_TURN_R") {
       requestedState = TEST_TURN_R;
       stateChangeRequested = true;
+    } else if (command == "TEST_TURN_180") {
+      requestedState = TEST_TURN_180;
+      stateChangeRequested = true;
     } else if (command == "BACK_ONE_CELL") {
       requestedState = TEST_BACK_ONE_CELL;
+      stateChangeRequested = true;
+    } else if (command == "MAP_SENSOR_DEBUG") {
+      requestedState = MAP_SENSOR_DEBUG;
       stateChangeRequested = true;
     }
   }
@@ -852,21 +1045,34 @@ void handleImuRezero() {
 
 void handleMazeData() {
   String walls = serializeMazeWalls();
+  String known = serializeMazeByteMap(maze_known_map);
   String path = serializeMazePath();
+  String visits = serializeMazeByteMap(maze_visit_count);
+  String dist = serializeMazeDist();
   String json;
-  json.reserve(MAZE_GRID_CELLS * 2 + 180);
+  json.reserve(MAZE_GRID_CELLS * 8 + 260);
   json += "{\"w\":";
   json += MAZE_GRID_W;
   json += ",\"h\":";
   json += MAZE_GRID_H;
   json += ",\"walls\":\"";
   json += walls;
+  json += "\",\"known\":\"";
+  json += known;
   json += "\",\"path\":\"";
   json += path;
+  json += "\",\"visits\":\"";
+  json += visits;
+  json += "\",\"dist\":\"";
+  json += dist;
   json += "\",\"sx\":";
   json += maze_start_x;
   json += ",\"sy\":";
   json += maze_start_y;
+  json += ",\"gx\":";
+  json += maze_goal_x;
+  json += ",\"gy\":";
+  json += maze_goal_y;
   json += ",\"head\":\"";
   json += pathValueToChar((uint8_t)maze_start_heading);
   json += "\",\"x\":";
@@ -890,15 +1096,48 @@ void handleMazeSet() {
   if (server.hasArg("walls") && server.hasArg("path")) {
     applyMazeStrings(server.arg("walls"), server.arg("path"));
   }
+  if (server.hasArg("known"))
+    applyMazeByteString(server.arg("known"), maze_known_map);
+  if (server.hasArg("visits"))
+    applyMazeByteString(server.arg("visits"), maze_visit_count);
   if (server.hasArg("sx"))
     maze_start_x = server.arg("sx").toInt();
   if (server.hasArg("sy"))
     maze_start_y = server.arg("sy").toInt();
+  if (server.hasArg("gx"))
+    maze_goal_x = server.arg("gx").toInt();
+  if (server.hasArg("gy"))
+    maze_goal_y = server.arg("gy").toInt();
   if (server.hasArg("head") && server.arg("head").length() > 0)
     maze_start_heading = pathCharToValue(server.arg("head")[0]);
 
   saveMazeConfig();
   server.send(200, "text/plain", "Da luu ma tran duong di.");
+}
+
+void handleMazeClear() {
+  if (isRunning) {
+    server.send(409, "text/plain", "Hay dung xe truoc khi xoa map hoc.");
+    return;
+  }
+
+  int sx = server.hasArg("sx") ? server.arg("sx").toInt() : maze_start_x;
+  int sy = server.hasArg("sy") ? server.arg("sy").toInt() : maze_start_y;
+  int head = maze_start_heading;
+  if (server.hasArg("head") && server.arg("head").length() > 0)
+    head = pathCharToValue(server.arg("head")[0]);
+  int gx = server.hasArg("gx") ? server.arg("gx").toInt() : maze_goal_x;
+  int gy = server.hasArg("gy") ? server.arg("gy").toInt() : maze_goal_y;
+  resetMazeMaps();
+  maze_start_x = constrain(sx, 0, MAZE_GRID_W - 1);
+  maze_start_y = constrain(sy, 0, MAZE_GRID_H - 1);
+  maze_start_heading = (head >= MAZE_PATH_N && head <= MAZE_PATH_W)
+                           ? head
+                           : MAZE_PATH_N;
+  maze_goal_x = constrain(gx, 0, MAZE_GRID_W - 1);
+  maze_goal_y = constrain(gy, 0, MAZE_GRID_H - 1);
+  saveMazeConfig();
+  server.send(200, "text/plain", "Da xoa map hoc, giu lai start/goal.");
 }
 
 void handleData() {
@@ -914,13 +1153,17 @@ void handleData() {
   int liveAutoBias = debugGyroZAutoBiasActive;
   uint32_t liveAutoBiasMs = debugGyroZAutoBiasStillMs;
   int liveAutoBiasReason = debugGyroZAutoBiasReason;
-  char jsonBuf[2400];
+  char jsonBuf[2850];
   snprintf(jsonBuf, sizeof(jsonBuf),
            "{\"irL\":%d,\"irFL\":%d,\"irFR\":%d,\"irR\":%d,"
            "\"dL\":%d,\"dFL\":%d,\"dFR\":%d,\"dR\":%d,"
            "\"encL\":%ld,\"encR\":%ld,"
-           "\"pwmL\":%d,\"pwmR\":%d,\"state\":%d,"
+           "\"pwmL\":%d,\"pwmR\":%d,\"state\":%d,\"floodRun\":%d,"
+           "\"loopMs\":%lu,\"overruns\":%lu,"
            "\"mazeX\":%d,\"mazeY\":%d,\"mazeHead\":%d,\"mazeNext\":%d,"
+           "\"mapSrc\":%d,\"mapLD\":%d,\"mapFD\":%d,\"mapRD\":%d,"
+           "\"mapLK\":%d,\"mapFK\":%d,\"mapRK\":%d,"
+           "\"mapLW\":%d,\"mapFW\":%d,\"mapRW\":%d,"
            "\"yaw\":%.2f,\"targetYaw\":%.2f,\"yawErr\":%.2f,"
            "\"gyroZRaw\":%.3f,\"gyroZCorr\":%.3f,\"gyroZBias\":%.3f,"
            "\"mpuTemp\":%.2f,\"yawDriftDpm\":%.2f,"
@@ -944,8 +1187,15 @@ void handleData() {
            liveIr.frontLeft - min_IR[SIDX(S_FL)],
            liveIr.frontRight - min_IR[SIDX(S_FR)],
            liveIr.right - min_IR[SIDX(S_R)], pulseL, pulseR, pwmL, pwmR,
-           (int)carState, debugMazeX, debugMazeY, debugMazeHeading,
-           debugMazeNextDir, liveYaw, liveTargetYaw, liveYawErr,
+           (int)carState, carState == MAZE_FLOOD_RUN ? 1 : 0,
+           (unsigned long)controlTaskLastLoopMs,
+           (unsigned long)controlTaskOverrunCount,
+           debugMazeX, debugMazeY, debugMazeHeading,
+           debugMazeNextDir, debugMapSenseSource, debugMapLeftDir,
+           debugMapFrontDir, debugMapRightDir, debugMapLeftKnown,
+           debugMapFrontKnown, debugMapRightKnown, debugMapLeftWall,
+           debugMapFrontWall, debugMapRightWall,
+           liveYaw, liveTargetYaw, liveYawErr,
            liveGyroZRaw, liveGyroZCorr, liveGyroZBias, liveMpuTemp,
            liveYawDriftDpm, liveAutoBias, (unsigned long)liveAutoBiasMs,
            liveAutoBiasReason,
@@ -965,6 +1215,11 @@ void handleData() {
 
 void webTask(void *pvParameters) {
   for (;;) {
+    if (mazeConfigSaveRequested && millis() - lastMazeConfigSaveMs > 500) {
+      mazeConfigSaveRequested = false;
+      lastMazeConfigSaveMs = millis();
+      saveMazeConfig();
+    }
     dnsServer.processNextRequest();
     server.handleClient();
     vTaskDelay(10 / portTICK_PERIOD_MS);
@@ -990,6 +1245,7 @@ void setupWebServer() {
   server.on("/imuRezero", handleImuRezero);
   server.on("/mazeData", handleMazeData);
   server.on("/mazeSet", handleMazeSet);
+  server.on("/mazeClear", handleMazeClear);
   server.on("/data", handleData);
 
   server.onNotFound([]() {

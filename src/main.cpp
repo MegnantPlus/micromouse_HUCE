@@ -33,6 +33,7 @@ const int IR_STEER_FILTER_KEEP = 4;
 const int IR_STEER_FILTER_TOTAL = 5;
 const uint32_t MAZE_POST_BACKUP_SETTLE_MS = 180;
 const uint32_t MAZE_CELL_DECISION_WAIT_MS = 3000;
+const uint32_t FLOOD_CELL_DECISION_WAIT_MS = 500;
 const uint32_t MAZE_CENTER_SETTLE_MS = 500;
 const uint32_t POINT_TURN_SETTLE_MS = 180;
 const uint32_t POINT_TURN_TOTAL_TIMEOUT_MS = 3000;
@@ -50,6 +51,9 @@ bool updatePointTurnCore(const RuntimeParams &cfg);
 bool updatePointTurn(const RuntimeParams &cfg);
 bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
                          int &filteredIrSteer, int boostPwmL, int boostPwmR);
+bool updateFloodPathRun(const IrSnapshot &rawIr, const IrSnapshot &ir,
+                        const RuntimeParams &cfg, int &filteredIrSteer,
+                        int boostPwmL, int boostPwmR);
 
 enum MazePhase
 {
@@ -63,7 +67,6 @@ enum MazePhase
   MAZE_RUN_TO_WALL,
   MAZE_BRAKE_AT_CELL,
   MAZE_BRAKE_AT_WALL,
-  MAZE_BACK_UP_UNTIL_TURN,
   MAZE_BACK_UP_AFTER_DEAD_END
 };
 
@@ -87,6 +90,7 @@ enum MatrixPhase
 {
   MATRIX_DECIDE,
   MATRIX_TURNING,
+  MATRIX_BACK_CELL,
   MATRIX_DRIVE_CELL,
   MATRIX_SETTLE_AT_CELL
 };
@@ -96,6 +100,16 @@ struct MazeWalls
   bool left;
   bool front;
   bool right;
+};
+
+struct MapSensorReading
+{
+  bool leftKnown;
+  bool frontKnown;
+  bool rightKnown;
+  bool leftWall;
+  bool frontWall;
+  bool rightWall;
 };
 
 MazePhase mazePhase = MAZE_DECIDE;
@@ -122,7 +136,13 @@ int matrixX = 0;
 int matrixY = 0;
 uint8_t matrixHeading = MAZE_PATH_N;
 uint8_t matrixNextDir = MAZE_PATH_EMPTY;
+bool matrixHasQueuedTurn = false;
+uint8_t matrixQueuedTurnDir = MAZE_PATH_EMPTY;
+bool matrixDecideAfterTurn = false;
+int matrixAvoidX = -1;
+int matrixAvoidY = -1;
 uint32_t matrixSettleStartMs = 0;
+bool matrixSettleMapUpdated = false;
 
 long absPulse(long value)
 {
@@ -150,10 +170,15 @@ float mazeTurnLeftDeg(const RuntimeParams &cfg)
   return mazeTurnAngleDeg(cfg);
 }
 
+long backOneCellPulses(const RuntimeParams &cfg)
+{
+  return max(1, cfg.maze_dead_end_backup_pulses);
+}
+
 bool isMazeRunState(RunState state)
 {
   return state == MAZE_RIGHT_HAND || state == MAZE_RIGHT_HAND_CELL ||
-         state == MAZE_MATRIX_RUN;
+         state == MAZE_MATRIX_RUN || state == MAZE_FLOOD_RUN;
 }
 
 bool isMazeCellRunState()
@@ -163,12 +188,18 @@ bool isMazeCellRunState()
 
 bool isPointTurnTestState(RunState state)
 {
-  return state == TEST_TURN_L || state == TEST_TURN_R;
+  return state == TEST_TURN_L || state == TEST_TURN_R ||
+         state == TEST_TURN_180;
 }
 
 bool isBackDriveTestState(RunState state)
 {
   return state == TEST_BACK_ONE_CELL;
+}
+
+bool isMapSensorDebugState(RunState state)
+{
+  return state == MAP_SENSOR_DEBUG;
 }
 
 bool isMatrixDir(uint8_t dir)
@@ -199,6 +230,21 @@ uint8_t wallBitForDir(uint8_t dir)
   }
 }
 
+uint8_t oppositeDir(uint8_t dir)
+{
+  return (uint8_t)((dir + 2) % 4);
+}
+
+uint8_t leftDir(uint8_t dir)
+{
+  return (uint8_t)((dir + 3) % 4);
+}
+
+uint8_t rightDir(uint8_t dir)
+{
+  return (uint8_t)((dir + 1) % 4);
+}
+
 int dirDx(uint8_t dir)
 {
   if (dir == MAZE_PATH_E)
@@ -217,6 +263,75 @@ int dirDy(uint8_t dir)
   return 0;
 }
 
+bool isKnownWall(int x, int y, uint8_t dir)
+{
+  return (maze_wall_map[x][y] & wallBitForDir(dir)) != 0;
+}
+
+bool isKnownDirection(int x, int y, uint8_t dir)
+{
+  return (maze_known_map[x][y] & wallBitForDir(dir)) != 0;
+}
+
+void setMazeWallKnown(int x, int y, uint8_t dir, bool hasWall,
+                      bool preserveExistingWall = false)
+{
+  if (!isMatrixCoordValid(x, y) || !isMatrixDir(dir))
+    return;
+
+  uint8_t bit = wallBitForDir(dir);
+  int nx = x + dirDx(dir);
+  int ny = y + dirDy(dir);
+  bool hasNeighbor = isMatrixCoordValid(nx, ny);
+  uint8_t opposite = oppositeDir(dir);
+  uint8_t oppositeBit = wallBitForDir(opposite);
+  bool keepExistingWall =
+      !hasWall && preserveExistingWall &&
+      (((maze_wall_map[x][y] & bit) != 0) ||
+       (hasNeighbor && ((maze_wall_map[nx][ny] & oppositeBit) != 0)));
+
+  maze_known_map[x][y] |= bit;
+  if (hasWall || keepExistingWall)
+    maze_wall_map[x][y] |= bit;
+  else
+    maze_wall_map[x][y] &= (uint8_t)~bit;
+
+  if (!hasNeighbor)
+    return;
+
+  maze_known_map[nx][ny] |= oppositeBit;
+  if (hasWall || keepExistingWall)
+    maze_wall_map[nx][ny] |= oppositeBit;
+  else
+    maze_wall_map[nx][ny] &= (uint8_t)~oppositeBit;
+}
+
+void setMazeSensorWallKnown(int x, int y, uint8_t dir, bool hasWall)
+{
+  setMazeWallKnown(x, y, dir, hasWall, true);
+}
+
+void setMazePassageKnown(int x, int y, uint8_t dir)
+{
+  setMazeWallKnown(x, y, dir, false);
+}
+
+bool isFloodBlockedAt(int x, int y, uint8_t dir)
+{
+  if (!isMatrixCoordValid(x, y) || !isMatrixDir(dir))
+    return true;
+  int nx = x + dirDx(dir);
+  int ny = y + dirDy(dir);
+  if (!isMatrixCoordValid(nx, ny))
+    return true;
+  return isKnownWall(x, y, dir) || isKnownWall(nx, ny, oppositeDir(dir));
+}
+
+bool isFloodBlocked(uint8_t dir)
+{
+  return isFloodBlockedAt(matrixX, matrixY, dir);
+}
+
 float turnDegreesForMatrixDir(uint8_t currentDir, uint8_t nextDir,
                               const RuntimeParams &cfg)
 {
@@ -226,8 +341,13 @@ float turnDegreesForMatrixDir(uint8_t currentDir, uint8_t nextDir,
   if (delta == 3)
     return mazeTurnLeftDeg(cfg);
   if (delta == 2)
-    return 2.0f * mazeTurnRightDeg(cfg);
+    return 0.0f;
   return 0.0f;
+}
+
+bool isOppositeMatrixDir(uint8_t currentDir, uint8_t nextDir)
+{
+  return ((int)nextDir - (int)currentDir + 4) % 4 == 2;
 }
 
 int sensorValueByIndex(const IrSnapshot &ir, int sensorIndex)
@@ -390,6 +510,15 @@ bool isMazeSideOpenForTurn(int sensorIndex, const IrSnapshot &ir,
                               : (value >= wallRef + openDistance);
 }
 
+bool isMazeSideClearForTurn(int sensorIndex, bool wallDetected,
+                            const IrSnapshot &ir, const RuntimeParams &cfg)
+{
+  if (isMazeSideOpenForTurn(sensorIndex, ir, cfg))
+    return true;
+
+  return isMazeSensorReady(sensorIndex, cfg) && !wallDetected;
+}
+
 MazeWalls readMazeWalls(const IrSnapshot &ir, const RuntimeParams &cfg)
 {
   MazeWalls walls = {};
@@ -429,13 +558,411 @@ void resetMatrixRunner()
                       ? (uint8_t)maze_start_heading
                       : MAZE_PATH_N;
   matrixNextDir = MAZE_PATH_EMPTY;
+  matrixHasQueuedTurn = false;
+  matrixQueuedTurnDir = MAZE_PATH_EMPTY;
+  matrixDecideAfterTurn = false;
+  matrixAvoidX = -1;
+  matrixAvoidY = -1;
   matrixSettleStartMs = 0;
+  matrixSettleMapUpdated = false;
   debugMazeX = matrixX;
   debugMazeY = matrixY;
   debugMazeHeading = matrixHeading;
-  debugMazeNextDir = matrixNextDir;
+  debugMazeNextDir =
+      matrixHasQueuedTurn ? matrixQueuedTurnDir : matrixNextDir;
   target_yaw = continuousYaw;
   isTurningTask = false;
+}
+
+void resetFloodRunner()
+{
+  resetMatrixRunner();
+  matrixSettleStartMs = millis();
+  matrixSettleMapUpdated = false;
+  matrixPhase = MATRIX_SETTLE_AT_CELL;
+}
+
+bool readDecisionSideWall(int sensorIndex, const IrSnapshot &ir,
+                          const RuntimeParams &cfg, bool &known)
+{
+  known = isMazeSensorReady(sensorIndex, cfg);
+  if (!known)
+    return false;
+
+  if (isMazeSensorWallCalibrated(sensorIndex, cfg))
+    return !isMazeSideOpenForTurn(sensorIndex, ir, cfg);
+
+  return isMazeWallBySensor(sensorIndex, ir, cfg);
+}
+
+bool readDecisionFrontWall(const IrSnapshot &ir, const RuntimeParams &cfg,
+                           bool &known)
+{
+  bool leftReady = isMazeSensorReady(FRONT_STOP_SENSOR_LEFT, cfg);
+  bool rightReady = isMazeSensorReady(FRONT_STOP_SENSOR_RIGHT, cfg);
+  known = leftReady && rightReady;
+  if (!known)
+    return false;
+
+  return isMazeFrontWallBySensor(FRONT_STOP_SENSOR_LEFT, ir, cfg) ||
+         isMazeFrontWallBySensor(FRONT_STOP_SENSOR_RIGHT, ir, cfg);
+}
+
+MapSensorReading readMapSensorReading(const IrSnapshot &ir,
+                                      const RuntimeParams &cfg)
+{
+  MapSensorReading reading = {};
+  reading.leftWall =
+      readDecisionSideWall(SENSOR_FL, ir, cfg, reading.leftKnown);
+  reading.frontWall = readDecisionFrontWall(ir, cfg, reading.frontKnown);
+  reading.rightWall =
+      readDecisionSideWall(SENSOR_FR, ir, cfg, reading.rightKnown);
+  return reading;
+}
+
+void updateMapSenseDebug(int source, bool leftKnown, bool leftWall,
+                         bool frontKnown, bool frontWall, bool rightKnown,
+                         bool rightWall)
+{
+  debugMapSenseSource = source;
+  debugMapLeftDir = leftDir(matrixHeading);
+  debugMapFrontDir = matrixHeading;
+  debugMapRightDir = rightDir(matrixHeading);
+  debugMapLeftKnown = leftKnown ? 1 : 0;
+  debugMapFrontKnown = frontKnown ? 1 : 0;
+  debugMapRightKnown = rightKnown ? 1 : 0;
+  debugMapLeftWall = leftWall ? 1 : 0;
+  debugMapFrontWall = frontWall ? 1 : 0;
+  debugMapRightWall = rightWall ? 1 : 0;
+}
+
+void updateLearnedWallsAtCurrentCell(const IrSnapshot &ir,
+                                     const RuntimeParams &cfg)
+{
+  MapSensorReading reading = readMapSensorReading(ir, cfg);
+
+  updateMapSenseDebug(1, reading.leftKnown, reading.leftWall,
+                      reading.frontKnown, reading.frontWall,
+                      reading.rightKnown, reading.rightWall);
+
+  if (reading.leftKnown)
+    setMazeSensorWallKnown(matrixX, matrixY, leftDir(matrixHeading),
+                           reading.leftWall);
+  if (reading.frontKnown)
+    setMazeSensorWallKnown(matrixX, matrixY, matrixHeading,
+                           reading.frontWall);
+  if (reading.rightKnown)
+    setMazeSensorWallKnown(matrixX, matrixY, rightDir(matrixHeading),
+                           reading.rightWall);
+
+  debugSideErrorL = reading.leftKnown ? (reading.leftWall ? 1 : 0) : -1;
+  debugSteerIR = reading.frontKnown ? (reading.frontWall ? 1 : 0) : -1;
+  debugSideErrorR = reading.rightKnown ? (reading.rightWall ? 1 : 0) : -1;
+}
+
+MapSensorReading updateFloodMapFromForwardLook(const IrSnapshot &ir,
+                                               const RuntimeParams &cfg,
+                                               int &nextCellX, int &nextCellY,
+                                               bool &frontOpen)
+{
+  MapSensorReading reading = readMapSensorReading(ir, cfg);
+  updateMapSenseDebug(1, reading.leftKnown, reading.leftWall,
+                      reading.frontKnown, reading.frontWall,
+                      reading.rightKnown, reading.rightWall);
+
+  nextCellX = matrixX + dirDx(matrixHeading);
+  nextCellY = matrixY + dirDy(matrixHeading);
+  frontOpen = reading.frontKnown && !reading.frontWall;
+
+  if (reading.frontKnown)
+    setMazeWallKnown(matrixX, matrixY, matrixHeading, reading.frontWall);
+
+  if (!isMatrixCoordValid(nextCellX, nextCellY))
+  {
+    debugSideErrorL = reading.leftKnown ? (reading.leftWall ? 1 : 0) : -1;
+    debugSteerIR = reading.frontKnown ? (reading.frontWall ? 1 : 0) : -1;
+    debugSideErrorR = reading.rightKnown ? (reading.rightWall ? 1 : 0) : -1;
+    return reading;
+  }
+
+  if (frontOpen && reading.leftKnown)
+    setMazeSensorWallKnown(nextCellX, nextCellY, leftDir(matrixHeading),
+                           reading.leftWall);
+  if (frontOpen && reading.rightKnown)
+    setMazeSensorWallKnown(nextCellX, nextCellY, rightDir(matrixHeading),
+                           reading.rightWall);
+
+  debugSideErrorL = reading.leftKnown ? (reading.leftWall ? 1 : 0) : -1;
+  debugSteerIR = reading.frontKnown ? (reading.frontWall ? 1 : 0) : -1;
+  debugSideErrorR = reading.rightKnown ? (reading.rightWall ? 1 : 0) : -1;
+  return reading;
+}
+
+void updateMapSensorDecisionDebug(const IrSnapshot &ir,
+                                  const RuntimeParams &cfg, int source)
+{
+  MapSensorReading reading = readMapSensorReading(ir, cfg);
+  MazeWalls decisionWalls = readMazeWalls(ir, cfg);
+
+  updateMapSenseDebug(source, reading.leftKnown, reading.leftWall,
+                      reading.frontKnown, reading.frontWall,
+                      reading.rightKnown, reading.rightWall);
+
+  bool rightOpen = reading.rightKnown && !reading.rightWall;
+  bool leftOpen = reading.leftKnown && !reading.leftWall;
+  bool frontOpen = reading.frontKnown && !reading.frontWall;
+
+  if (frontOpen && rightOpen)
+  {
+    debugMazeNextDir = rightDir(matrixHeading);
+    debugTotalSteer = 2;
+  }
+  else if (frontOpen && leftOpen)
+  {
+    debugMazeNextDir = leftDir(matrixHeading);
+    debugTotalSteer = -3;
+  }
+  else if (frontOpen)
+  {
+    debugMazeNextDir = matrixHeading;
+    debugTotalSteer = 0;
+  }
+  else if (rightOpen)
+  {
+    debugMazeNextDir = rightDir(matrixHeading);
+    debugTotalSteer = 1;
+  }
+  else if (!reading.frontKnown && !decisionWalls.front)
+  {
+    debugMazeNextDir = matrixHeading;
+    debugTotalSteer = 0;
+  }
+  else if (leftOpen)
+  {
+    debugMazeNextDir = leftDir(matrixHeading);
+    debugTotalSteer = -1;
+  }
+  else
+  {
+    debugMazeNextDir = oppositeDir(matrixHeading);
+    debugTotalSteer = -2;
+  }
+
+  debugMazeX = matrixX;
+  debugMazeY = matrixY;
+  debugMazeHeading = matrixHeading;
+  debugSideErrorL = reading.leftKnown ? (reading.leftWall ? 1 : 0) : -1;
+  debugSteerIR = reading.frontKnown ? (reading.frontWall ? 1 : 0) : -1;
+  debugSideErrorR = reading.rightKnown ? (reading.rightWall ? 1 : 0) : -1;
+}
+
+void updateLearnedSideWallsWhileDriving(const IrSnapshot &ir,
+                                        const RuntimeParams &cfg)
+{
+  long travel = averageTravelPulse();
+  int cellX = matrixX;
+  int cellY = matrixY;
+
+  if (travel >= max(1, cfg.pulses_per_cell / 2))
+  {
+    cellX += dirDx(matrixHeading);
+    cellY += dirDy(matrixHeading);
+  }
+
+  if (!isMatrixCoordValid(cellX, cellY))
+    return;
+
+  bool leftKnown = false;
+  bool rightKnown = false;
+  bool leftWall = readDecisionSideWall(SENSOR_FL, ir, cfg, leftKnown);
+  bool rightWall = readDecisionSideWall(SENSOR_FR, ir, cfg, rightKnown);
+
+  updateMapSenseDebug(2, leftKnown, leftWall, false, false, rightKnown,
+                      rightWall);
+
+  if (leftKnown)
+    setMazeSensorWallKnown(cellX, cellY, leftDir(matrixHeading), leftWall);
+  if (rightKnown)
+    setMazeSensorWallKnown(cellX, cellY, rightDir(matrixHeading), rightWall);
+}
+
+void computeFloodDistances()
+{
+  for (int y = 0; y < MAZE_GRID_H; y++)
+  {
+    for (int x = 0; x < MAZE_GRID_W; x++)
+    {
+      maze_dist_map[x][y] = MAZE_FLOOD_UNREACHABLE;
+    }
+  }
+
+  if (!isMatrixCoordValid(maze_goal_x, maze_goal_y))
+    return;
+
+  int queueX[MAZE_GRID_CELLS];
+  int queueY[MAZE_GRID_CELLS];
+  int head = 0;
+  int tail = 0;
+
+  maze_dist_map[maze_goal_x][maze_goal_y] = 0;
+  queueX[tail] = maze_goal_x;
+  queueY[tail] = maze_goal_y;
+  tail++;
+
+  while (head < tail)
+  {
+    int x = queueX[head];
+    int y = queueY[head];
+    head++;
+
+    uint16_t baseDist = maze_dist_map[x][y];
+    for (uint8_t dir = MAZE_PATH_N; dir <= MAZE_PATH_W; dir++)
+    {
+      int nx = x + dirDx(dir);
+      int ny = y + dirDy(dir);
+      if (!isMatrixCoordValid(nx, ny))
+        continue;
+      if (isFloodBlockedAt(x, y, dir))
+        continue;
+      if (maze_dist_map[nx][ny] <= baseDist + 1)
+        continue;
+
+      maze_dist_map[nx][ny] = baseDist + 1;
+      if (tail < MAZE_GRID_CELLS)
+      {
+        queueX[tail] = nx;
+        queueY[tail] = ny;
+        tail++;
+      }
+    }
+  }
+}
+
+uint8_t chooseFloodNextDirAtAvoiding(int x, int y, uint8_t heading,
+                                     const RuntimeParams &cfg,
+                                     int avoidX, int avoidY)
+{
+  (void)cfg;
+
+  uint32_t bestScore = UINT32_MAX;
+  uint8_t bestDir = MAZE_PATH_EMPTY;
+
+  for (uint8_t dir = MAZE_PATH_N; dir <= MAZE_PATH_W; dir++)
+  {
+    if (isFloodBlockedAt(x, y, dir))
+      continue;
+
+    int nx = x + dirDx(dir);
+    int ny = y + dirDy(dir);
+    if (nx == avoidX && ny == avoidY)
+      continue;
+
+    uint16_t dist = maze_dist_map[nx][ny];
+    if (dist == MAZE_FLOOD_UNREACHABLE)
+      continue;
+
+    int delta = ((int)dir - (int)heading + 4) % 4;
+    int turnCost = (delta == 0) ? 0 : ((delta == 2) ? 10 : 4);
+    int visitCost = min((int)maze_visit_count[nx][ny], 15) * 20;
+    int knownCost = isKnownDirection(x, y, dir) ? 3 : 0;
+    uint32_t score = (uint32_t)dist * 1000 + visitCost + turnCost + knownCost;
+
+    if (score < bestScore)
+    {
+      bestScore = score;
+      bestDir = dir;
+    }
+  }
+
+  return bestDir;
+}
+
+uint8_t chooseFloodNextDirAt(int x, int y, uint8_t heading,
+                             const RuntimeParams &cfg)
+{
+  return chooseFloodNextDirAtAvoiding(x, y, heading, cfg, -1, -1);
+}
+
+uint8_t chooseFloodNextDir(const RuntimeParams &cfg)
+{
+  return chooseFloodNextDirAt(matrixX, matrixY, matrixHeading, cfg);
+}
+
+uint8_t chooseOpenFallbackDirAt(int x, int y, uint8_t heading,
+                                int avoidX, int avoidY)
+{
+  uint32_t bestScore = UINT32_MAX;
+  uint8_t bestDir = MAZE_PATH_EMPTY;
+
+  for (uint8_t dir = MAZE_PATH_N; dir <= MAZE_PATH_W; dir++)
+  {
+    if (isFloodBlockedAt(x, y, dir))
+      continue;
+
+    int nx = x + dirDx(dir);
+    int ny = y + dirDy(dir);
+    if (nx == avoidX && ny == avoidY)
+      continue;
+
+    int delta = ((int)dir - (int)heading + 4) % 4;
+    int turnCost = (delta == 0) ? 0 : ((delta == 2) ? 12 : 4);
+    int visitCost = min((int)maze_visit_count[nx][ny], 15) * 10;
+    uint32_t score = (uint32_t)visitCost + turnCost;
+
+    if (score < bestScore)
+    {
+      bestScore = score;
+      bestDir = dir;
+    }
+  }
+
+  return bestDir;
+}
+
+void generatePathFromFloodDistances()
+{
+  for (int y = 0; y < MAZE_GRID_H; y++)
+  {
+    for (int x = 0; x < MAZE_GRID_W; x++)
+      maze_path_map[x][y] = MAZE_PATH_EMPTY;
+  }
+
+  int x = constrain(maze_start_x, 0, MAZE_GRID_W - 1);
+  int y = constrain(maze_start_y, 0, MAZE_GRID_H - 1);
+  for (int step = 0; step < MAZE_GRID_CELLS; step++)
+  {
+    if (x == maze_goal_x && y == maze_goal_y)
+    {
+      maze_path_map[x][y] = MAZE_PATH_STOP;
+      return;
+    }
+
+    uint16_t currentDist = maze_dist_map[x][y];
+    if (currentDist == MAZE_FLOOD_UNREACHABLE)
+      return;
+
+    uint8_t bestDir = MAZE_PATH_EMPTY;
+    uint16_t bestDist = currentDist;
+    for (uint8_t dir = MAZE_PATH_N; dir <= MAZE_PATH_W; dir++)
+    {
+      if (isFloodBlockedAt(x, y, dir))
+        continue;
+      int nx = x + dirDx(dir);
+      int ny = y + dirDy(dir);
+      if (maze_dist_map[nx][ny] < bestDist)
+      {
+        bestDist = maze_dist_map[nx][ny];
+        bestDir = dir;
+      }
+    }
+
+    if (bestDir == MAZE_PATH_EMPTY)
+      return;
+
+    maze_path_map[x][y] = bestDir;
+    x += dirDx(bestDir);
+    y += dirDy(bestDir);
+  }
 }
 
 void queueMazeTurn(float turnDegrees)
@@ -514,14 +1041,13 @@ void startMazeLateTurn(float turnDegrees, const RuntimeParams &cfg)
   isTurningTask = false;
 }
 
-void startMazeDeadEndBackup()
+void startMazeDeadEndBackup(const RuntimeParams &cfg)
 {
-  resetMotorsAndPID();
-  resetRunProfileAndPidMemory();
   mazeHasQueuedTurn = false;
   mazeQueuedTurnDegrees = 0.0f;
-  mazePhase = isMazeCellRunState() ? MAZE_BACK_UP_UNTIL_TURN
-                                   : MAZE_BACK_UP_AFTER_DEAD_END;
+  target_yaw = continuousYaw;
+  startBackDrive(backOneCellPulses(cfg));
+  mazePhase = MAZE_BACK_UP_AFTER_DEAD_END;
   isTurningTask = false;
 }
 
@@ -610,6 +1136,16 @@ int computeHeadingHoldSteer(const RuntimeParams &cfg, int limit)
   return constrain((int)(yawError * cfg.k_gyro), -limit, limit);
 }
 
+uint32_t pointTurnTimeoutMs()
+{
+  float turnMagnitude = fabsf(mazeTurnDegrees);
+  if (turnMagnitude <= 90.0f)
+    return POINT_TURN_TOTAL_TIMEOUT_MS;
+
+  return POINT_TURN_TOTAL_TIMEOUT_MS +
+         (uint32_t)((turnMagnitude - 90.0f) * 25.0f);
+}
+
 bool updatePointTurnCore(const RuntimeParams &cfg)
 {
   float yawRemainingSigned = target_yaw - continuousYaw;
@@ -647,8 +1183,18 @@ bool updatePointTurnCore(const RuntimeParams &cfg)
     return false;
   }
 
-  if (millis() - mazeTurnStartMs > POINT_TURN_TOTAL_TIMEOUT_MS)
+  if (millis() - mazeTurnStartMs > pointTurnTimeoutMs())
   {
+    if (carState == MAZE_FLOOD_RUN)
+    {
+      debugTotalSteer = -130;
+      target_yaw = continuousYaw;
+      pointTurnPhase = POINT_TURN_COARSE;
+      pointTurnSettleStartMs = 0;
+      isTurningTask = false;
+      return true;
+    }
+
     changeState(IDLE);
     return false;
   }
@@ -1176,10 +1722,100 @@ bool updateOneCellDrive(const IrSnapshot &ir, const RuntimeParams &cfg,
 
 void startMatrixCellDrive()
 {
+  matrixDecideAfterTurn = false;
+  matrixAvoidX = -1;
+  matrixAvoidY = -1;
   resetMotorsAndPID();
   resetRunProfileAndPidMemory();
   matrixPhase = MATRIX_DRIVE_CELL;
   isTurningTask = false;
+}
+
+void startMatrixBackCell(const RuntimeParams &cfg)
+{
+  matrixDecideAfterTurn = false;
+  startBackDrive(backOneCellPulses(cfg));
+  matrixPhase = MATRIX_BACK_CELL;
+  isTurningTask = false;
+}
+
+bool startMatrixQueuedTurnIfNeeded(const RuntimeParams &cfg)
+{
+  if (!matrixHasQueuedTurn || !isMatrixDir(matrixQueuedTurnDir))
+    return false;
+
+  uint8_t queuedDir = matrixQueuedTurnDir;
+  matrixHasQueuedTurn = false;
+  matrixQueuedTurnDir = MAZE_PATH_EMPTY;
+  matrixNextDir = queuedDir;
+  debugMazeNextDir = matrixNextDir;
+
+  if (isOppositeMatrixDir(matrixHeading, queuedDir))
+  {
+    startMatrixBackCell(cfg);
+    return true;
+  }
+
+  float turnDegrees = turnDegreesForMatrixDir(matrixHeading, queuedDir, cfg);
+  if (fabsf(turnDegrees) > 0.1f)
+  {
+    matrixDecideAfterTurn = true;
+    beginPointTurn(turnDegrees);
+    matrixPhase = MATRIX_TURNING;
+  }
+  else
+  {
+    matrixHeading = queuedDir;
+    debugMazeHeading = matrixHeading;
+    startMatrixCellDrive();
+  }
+
+  return true;
+}
+
+void finishMatrixBackCell(int &filteredIrSteer, bool learnPassage)
+{
+  int prevX = matrixX;
+  int prevY = matrixY;
+  uint8_t backDir =
+      isMatrixDir(matrixNextDir) ? matrixNextDir : oppositeDir(matrixHeading);
+
+  if (learnPassage)
+  {
+    setMazePassageKnown(prevX, prevY, backDir);
+    matrixAvoidX = prevX;
+    matrixAvoidY = prevY;
+  }
+  else
+  {
+    matrixAvoidX = -1;
+    matrixAvoidY = -1;
+  }
+
+  matrixX += dirDx(backDir);
+  matrixY += dirDy(backDir);
+  debugMazeX = matrixX;
+  debugMazeY = matrixY;
+  debugMazeHeading = matrixHeading;
+  filteredIrSteer = 0;
+  matrixSettleStartMs = millis();
+  matrixSettleMapUpdated = false;
+  matrixPhase = MATRIX_SETTLE_AT_CELL;
+  brakeMotors();
+}
+
+void retryFloodDecisionAtCurrentCell(int debugCode)
+{
+  debugTotalSteer = debugCode;
+  matrixHasQueuedTurn = false;
+  matrixQueuedTurnDir = MAZE_PATH_EMPTY;
+  matrixNextDir = MAZE_PATH_EMPTY;
+  matrixAvoidX = -1;
+  matrixAvoidY = -1;
+  matrixSettleStartMs = millis();
+  matrixSettleMapUpdated = false;
+  matrixPhase = MATRIX_SETTLE_AT_CELL;
+  brakeMotors();
 }
 
 bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
@@ -1188,10 +1824,16 @@ bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
   debugMazeX = matrixX;
   debugMazeY = matrixY;
   debugMazeHeading = matrixHeading;
-  debugMazeNextDir = matrixNextDir;
+  debugMazeNextDir =
+      matrixHasQueuedTurn ? matrixQueuedTurnDir : matrixNextDir;
 
   if (!isMatrixCoordValid(matrixX, matrixY))
-    return true;
+  {
+    matrixX = constrain(matrixX, 0, MAZE_GRID_W - 1);
+    matrixY = constrain(matrixY, 0, MAZE_GRID_H - 1);
+    retryFloodDecisionAtCurrentCell(-122);
+    return false;
+  }
 
   if (matrixPhase == MATRIX_SETTLE_AT_CELL)
   {
@@ -1215,7 +1857,27 @@ bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
       matrixHeading = matrixNextDir;
       filteredIrSteer = 0;
       debugMazeHeading = matrixHeading;
-      startMatrixCellDrive();
+      if (matrixDecideAfterTurn)
+      {
+        matrixDecideAfterTurn = false;
+        matrixSettleStartMs = millis();
+        matrixSettleMapUpdated = false;
+        matrixPhase = MATRIX_SETTLE_AT_CELL;
+        brakeMotors();
+      }
+      else
+      {
+        startMatrixCellDrive();
+      }
+    }
+    return false;
+  }
+
+  if (matrixPhase == MATRIX_BACK_CELL)
+  {
+    if (updateBackDrive(cfg))
+    {
+      finishMatrixBackCell(filteredIrSteer, false);
     }
     return false;
   }
@@ -1230,7 +1892,13 @@ bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
       debugMazeX = matrixX;
       debugMazeY = matrixY;
       filteredIrSteer = 0;
+      if (startMatrixQueuedTurnIfNeeded(cfg))
+      {
+        requestMazeConfigSave();
+        return false;
+      }
       matrixSettleStartMs = millis();
+      matrixSettleMapUpdated = false;
       matrixPhase = MATRIX_SETTLE_AT_CELL;
       brakeMotors();
     }
@@ -1265,9 +1933,16 @@ bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
     return true;
   }
 
+  if (isOppositeMatrixDir(matrixHeading, nextDir))
+  {
+    startMatrixBackCell(cfg);
+    return false;
+  }
+
   float turnDegrees = turnDegreesForMatrixDir(matrixHeading, nextDir, cfg);
   if (fabsf(turnDegrees) > 0.1f)
   {
+    matrixDecideAfterTurn = false;
     beginPointTurn(turnDegrees);
     matrixPhase = MATRIX_TURNING;
   }
@@ -1278,6 +1953,262 @@ bool updateMatrixPathRun(const IrSnapshot &ir, const RuntimeParams &cfg,
     startMatrixCellDrive();
   }
 
+  return false;
+}
+
+bool updateFloodPathRun(const IrSnapshot &rawIr, const IrSnapshot &ir,
+                        const RuntimeParams &cfg, int &filteredIrSteer,
+                        int boostPwmL, int boostPwmR)
+{
+  debugMazeX = matrixX;
+  debugMazeY = matrixY;
+  debugMazeHeading = matrixHeading;
+  debugMazeNextDir =
+      matrixHasQueuedTurn ? matrixQueuedTurnDir : matrixNextDir;
+
+  if (!isMatrixCoordValid(matrixX, matrixY))
+  {
+    matrixX = constrain(matrixX, 0, MAZE_GRID_W - 1);
+    matrixY = constrain(matrixY, 0, MAZE_GRID_H - 1);
+    debugMazeX = matrixX;
+    debugMazeY = matrixY;
+    retryFloodDecisionAtCurrentCell(-122);
+    return false;
+  }
+
+  if (matrixPhase == MATRIX_SETTLE_AT_CELL)
+  {
+    brakeMotors();
+    filteredIrSteer = 0;
+    if (!matrixSettleMapUpdated)
+    {
+      if (matrixX != maze_goal_x || matrixY != maze_goal_y)
+      {
+        int previewX = matrixX;
+        int previewY = matrixY;
+        bool previewFrontOpen = false;
+        updateFloodMapFromForwardLook(rawIr, cfg, previewX, previewY,
+                                      previewFrontOpen);
+        computeFloodDistances();
+      }
+      matrixSettleMapUpdated = true;
+    }
+
+    uint32_t elapsedMs = millis() - matrixSettleStartMs;
+    uint32_t waitMs = FLOOD_CELL_DECISION_WAIT_MS;
+    debugSteerIR = 0;
+    debugTotalSteer =
+        (int)((elapsedMs >= waitMs)
+                  ? 0
+                  : (waitMs - elapsedMs));
+    if (elapsedMs >= waitMs)
+    {
+      matrixSettleMapUpdated = false;
+      matrixPhase = MATRIX_DECIDE;
+    }
+    return false;
+  }
+
+  if (matrixPhase == MATRIX_TURNING)
+  {
+    if (updatePointTurn(cfg))
+    {
+      matrixHeading = matrixNextDir;
+      filteredIrSteer = 0;
+      debugMazeHeading = matrixHeading;
+      if (matrixDecideAfterTurn)
+      {
+        matrixDecideAfterTurn = false;
+        matrixSettleStartMs = millis();
+        matrixSettleMapUpdated = false;
+        matrixPhase = MATRIX_SETTLE_AT_CELL;
+        brakeMotors();
+      }
+      else
+      {
+        startMatrixCellDrive();
+      }
+    }
+    return false;
+  }
+
+  if (matrixPhase == MATRIX_BACK_CELL)
+  {
+    if (updateBackDrive(cfg))
+    {
+      finishMatrixBackCell(filteredIrSteer, true);
+      requestMazeConfigSave();
+    }
+    return false;
+  }
+
+  if (matrixPhase == MATRIX_DRIVE_CELL)
+  {
+    int prevX = matrixX;
+    int prevY = matrixY;
+    uint8_t driveDir = matrixHeading;
+    if (updateOneCellDrive(ir, cfg, filteredIrSteer, boostPwmL, boostPwmR,
+                           false, nullptr))
+    {
+      setMazePassageKnown(prevX, prevY, driveDir);
+      matrixX += dirDx(driveDir);
+      matrixY += dirDy(driveDir);
+      debugMazeX = matrixX;
+      debugMazeY = matrixY;
+      filteredIrSteer = 0;
+      if (startMatrixQueuedTurnIfNeeded(cfg))
+      {
+        requestMazeConfigSave();
+        return false;
+      }
+      matrixSettleStartMs = millis();
+      matrixSettleMapUpdated = false;
+      matrixPhase = MATRIX_SETTLE_AT_CELL;
+      brakeMotors();
+      requestMazeConfigSave();
+    }
+    return false;
+  }
+
+  brakeMotors();
+  filteredIrSteer = 0;
+
+  if (matrixX == maze_goal_x && matrixY == maze_goal_y)
+  {
+    generatePathFromFloodDistances();
+    maze_path_map[matrixX][matrixY] = MAZE_PATH_STOP;
+    requestMazeConfigSave();
+    return true;
+  }
+
+  if (maze_visit_count[matrixX][matrixY] < 255)
+    maze_visit_count[matrixX][matrixY]++;
+
+  int nextCellX = matrixX;
+  int nextCellY = matrixY;
+  bool frontOpen = false;
+  updateFloodMapFromForwardLook(rawIr, cfg, nextCellX, nextCellY, frontOpen);
+  computeFloodDistances();
+
+  bool hasAvoidCell = isMatrixCoordValid(matrixAvoidX, matrixAvoidY);
+  bool frontIsAvoided =
+      frontOpen && isMatrixCoordValid(nextCellX, nextCellY) &&
+      nextCellX == matrixAvoidX && nextCellY == matrixAvoidY;
+
+  if (!frontOpen || !isMatrixCoordValid(nextCellX, nextCellY) ||
+      frontIsAvoided)
+  {
+    uint8_t currentNextDir =
+        hasAvoidCell ? chooseFloodNextDirAtAvoiding(matrixX, matrixY,
+                                                    matrixHeading, cfg,
+                                                    matrixAvoidX, matrixAvoidY)
+                     : MAZE_PATH_EMPTY;
+    if (!isMatrixDir(currentNextDir))
+      currentNextDir = chooseFloodNextDir(cfg);
+    if (!isMatrixDir(currentNextDir))
+    {
+      currentNextDir =
+          chooseOpenFallbackDirAt(matrixX, matrixY, matrixHeading,
+                                  matrixAvoidX, matrixAvoidY);
+    }
+    if (!isMatrixDir(currentNextDir) && hasAvoidCell)
+      currentNextDir = chooseOpenFallbackDirAt(matrixX, matrixY,
+                                               matrixHeading, -1, -1);
+
+    matrixNextDir = currentNextDir;
+    debugMazeNextDir = matrixNextDir;
+
+    if (!isMatrixDir(currentNextDir))
+    {
+      retryFloodDecisionAtCurrentCell(-120);
+      requestMazeConfigSave();
+      return false;
+    }
+
+    int currentNextX = matrixX + dirDx(currentNextDir);
+    int currentNextY = matrixY + dirDy(currentNextDir);
+    if (!isMatrixCoordValid(currentNextX, currentNextY))
+    {
+      retryFloodDecisionAtCurrentCell(-121);
+      requestMazeConfigSave();
+      return false;
+    }
+
+    if (isOppositeMatrixDir(matrixHeading, currentNextDir))
+    {
+      startMatrixBackCell(cfg);
+      requestMazeConfigSave();
+      return false;
+    }
+
+    float turnDegrees = turnDegreesForMatrixDir(matrixHeading,
+                                                currentNextDir, cfg);
+    if (fabsf(turnDegrees) > 0.1f)
+    {
+      matrixDecideAfterTurn = true;
+      beginPointTurn(turnDegrees);
+      matrixPhase = MATRIX_TURNING;
+    }
+    else
+    {
+      startMatrixCellDrive();
+    }
+
+    requestMazeConfigSave();
+    return false;
+  }
+
+  if (nextCellX == maze_goal_x && nextCellY == maze_goal_y)
+  {
+    generatePathFromFloodDistances();
+    maze_path_map[nextCellX][nextCellY] = MAZE_PATH_STOP;
+    matrixHasQueuedTurn = false;
+    matrixQueuedTurnDir = MAZE_PATH_EMPTY;
+    matrixNextDir = matrixHeading;
+    debugMazeNextDir = matrixNextDir;
+    startMatrixCellDrive();
+    requestMazeConfigSave();
+    return false;
+  }
+
+  uint8_t nextDir = chooseFloodNextDirAt(nextCellX, nextCellY,
+                                         matrixHeading, cfg);
+  if (!isMatrixDir(nextDir))
+    nextDir = chooseOpenFallbackDirAt(nextCellX, nextCellY, matrixHeading,
+                                      -1, -1);
+
+  if (!isMatrixDir(nextDir))
+  {
+    retryFloodDecisionAtCurrentCell(-120);
+    requestMazeConfigSave();
+    return false;
+  }
+
+  int decisionNextX = nextCellX + dirDx(nextDir);
+  int decisionNextY = nextCellY + dirDy(nextDir);
+  if (!isMatrixCoordValid(decisionNextX, decisionNextY))
+  {
+    retryFloodDecisionAtCurrentCell(-121);
+    requestMazeConfigSave();
+    return false;
+  }
+
+  matrixHasQueuedTurn = false;
+  matrixQueuedTurnDir = MAZE_PATH_EMPTY;
+
+  int delta = ((int)nextDir - (int)matrixHeading + 4) % 4;
+  if (delta == 1 || delta == 2 || delta == 3)
+  {
+    matrixHasQueuedTurn = true;
+    matrixQueuedTurnDir = nextDir;
+  }
+
+  matrixNextDir = matrixHeading;
+  debugMazeNextDir =
+      matrixHasQueuedTurn ? matrixQueuedTurnDir : matrixNextDir;
+  startMatrixCellDrive();
+
+  requestMazeConfigSave();
   return false;
 }
 
@@ -1332,7 +2263,8 @@ void finishControlLoop(uint32_t loopStartMs)
   if (elapsedMs > CONTROL_LOOP_SOFT_TIMEOUT_MS)
   {
     controlTaskOverrunCount++;
-    changeState(IDLE);
+    if (carState != MAZE_FLOOD_RUN)
+      changeState(IDLE);
   }
 
   feedControlTaskWatchdog();
@@ -1394,15 +2326,29 @@ void changeState(RunState newState)
     isRunning = true;
     pixels.setPixelColor(0, pixels.Color(255, 128, 0));
     break;
+  case TEST_TURN_180:
+    resetWheelPidMemory();
+    target_yaw = continuousYaw;
+    beginPointTurn(-180.0f, false);
+    isRunning = true;
+    pixels.setPixelColor(0, pixels.Color(255, 220, 0));
+    break;
   case TEST_BACK_ONE_CELL:
   {
     RuntimeParams cfg = captureActiveRuntimeParams();
     target_yaw = continuousYaw;
-    startBackDrive(cfg.pulses_per_cell);
+    startBackDrive(backOneCellPulses(cfg));
     isRunning = true;
     pixels.setPixelColor(0, pixels.Color(128, 128, 255));
     break;
   }
+  case MAP_SENSOR_DEBUG:
+    resetWheelPidMemory();
+    target_yaw = continuousYaw;
+    resetMatrixRunner();
+    isRunning = true;
+    pixels.setPixelColor(0, pixels.Color(0, 255, 255));
+    break;
   case MAZE_MATRIX_RUN:
     resetWheelPidMemory();
     virtualVel = 0.0f;
@@ -1411,6 +2357,15 @@ void changeState(RunState newState)
     resetMatrixRunner();
     isRunning = true;
     pixels.setPixelColor(0, pixels.Color(0, 255, 180));
+    break;
+  case MAZE_FLOOD_RUN:
+    resetWheelPidMemory();
+    virtualVel = 0.0f;
+    virtualPos = 0.0f;
+    target_yaw = continuousYaw;
+    resetFloodRunner();
+    isRunning = true;
+    pixels.setPixelColor(0, pixels.Color(255, 220, 0));
     break;
   case IDLE:
   default:
@@ -1467,6 +2422,7 @@ void mainControlTask(void *pvParameters)
         (isRunning && !isMazeRunState(carState) &&
          !isPointTurnTestState(carState) &&
          !isBackDriveTestState(carState) &&
+         !isMapSensorDebugState(carState) &&
          isFrontWallDetected(rawIr, cfg));
     if (frontWallStop)
     {
@@ -1512,6 +2468,7 @@ void mainControlTask(void *pvParameters)
 
         case TEST_TURN_L:
         case TEST_TURN_R:
+        case TEST_TURN_180:
           if (updatePointTurn(cfg))
           {
             changeState(IDLE);
@@ -1525,11 +2482,28 @@ void mainControlTask(void *pvParameters)
           }
           break;
 
+        case MAP_SENSOR_DEBUG:
+          brakeMotors();
+          filteredIrSteer = 0;
+          updateMapSensorDecisionDebug(rawIr, cfg, 3);
+          break;
+
         case MAZE_MATRIX_RUN:
           if (updateMatrixPathRun(ir, cfg, filteredIrSteer, boostPwmL,
                                   boostPwmR))
           {
             changeState(IDLE);
+          }
+          break;
+
+        case MAZE_FLOOD_RUN:
+          if (updateFloodPathRun(rawIr, ir, cfg, filteredIrSteer, boostPwmL,
+                                 boostPwmR))
+          {
+            if (matrixX == maze_goal_x && matrixY == maze_goal_y)
+              changeState(IDLE);
+            else
+              retryFloodDecisionAtCurrentCell(-140);
           }
           break;
 
@@ -1634,7 +2608,7 @@ void mainControlTask(void *pvParameters)
             }
             else
             {
-              startMazeDeadEndBackup();
+              startMazeDeadEndBackup(cfg);
             }
             break;
           }
@@ -1657,8 +2631,10 @@ void mainControlTask(void *pvParameters)
           if (mazePhase == MAZE_DECIDE_AFTER_BACKUP)
           {
             MazeWalls walls = readMazeWalls(rawIr, cfg);
-            bool rightOpen = isMazeSideOpenForTurn(SENSOR_FR, rawIr, cfg);
-            bool leftOpen = isMazeSideOpenForTurn(SENSOR_FL, rawIr, cfg);
+            bool rightOpen =
+                isMazeSideClearForTurn(SENSOR_FR, walls.right, rawIr, cfg);
+            bool leftOpen =
+                isMazeSideClearForTurn(SENSOR_FL, walls.left, rawIr, cfg);
             debugSideErrorL = walls.left ? 1 : 0;
             debugSideErrorR = walls.right ? 1 : 0;
             debugSteerIR = walls.front ? 1 : 0;
@@ -1666,26 +2642,7 @@ void mainControlTask(void *pvParameters)
             filteredIrSteer = 0;
             brakeMotors();
 
-            if (cellMode)
-            {
-              if (!walls.right)
-              {
-                startMazeTurn(mazeTurnRightDeg(cfg));
-              }
-              else if (!walls.front)
-              {
-                startMazeStraightRun();
-              }
-              else if (!walls.left)
-              {
-                startMazeTurn(mazeTurnLeftDeg(cfg));
-              }
-              else
-              {
-                startMazeDeadEndBackup();
-              }
-            }
-            else if (rightOpen)
+            if (rightOpen)
             {
               startMazeTurn(mazeTurnRightDeg(cfg));
             }
@@ -1695,7 +2652,7 @@ void mainControlTask(void *pvParameters)
             }
             else
             {
-              startMazeDeadEndBackup();
+              startMazeDeadEndBackup(cfg);
             }
             break;
           }
@@ -1794,64 +2751,15 @@ void mainControlTask(void *pvParameters)
             break;
           }
 
-          if (mazePhase == MAZE_BACK_UP_UNTIL_TURN)
-          {
-            bool rightOpen = isMazeSideOpenForTurn(SENSOR_FR, rawIr, cfg);
-            bool leftOpen = isMazeSideOpenForTurn(SENSOR_FL, rawIr, cfg);
-
-            debugSideErrorL = leftOpen ? 1 : 0;
-            debugSideErrorR = rightOpen ? 1 : 0;
-            debugSteerIR = 0;
-            debugTotalSteer = (int)averageTravelPulse();
-
-            if (rightOpen || leftOpen)
-            {
-              float turnDegrees = rightOpen ? mazeTurnRightDeg(cfg)
-                                            : mazeTurnLeftDeg(cfg);
-              brakeMotors();
-              resetMotorsAndPID();
-              resetRunProfileAndPidMemory();
-              filteredIrSteer = 0;
-              target_yaw = continuousYaw;
-              startMazeTurn(turnDegrees);
-              break;
-            }
-
-            int backupPwm =
-                constrain(cfg.maze_dead_end_backup_pwm, 0, cfg.Turn_Max);
-            int targetPwm_L = -backupPwm;
-            int targetPwm_R = -backupPwm;
-            int newPwm_L = applyRateLimit(targetPwm_L, pwmL, cfg.ramp_rate);
-            int newPwm_R = applyRateLimit(targetPwm_R, pwmR, cfg.ramp_rate);
-            setLeftMotor(newPwm_L);
-            setRightMotor(newPwm_R);
-            break;
-          }
-
           if (mazePhase == MAZE_BACK_UP_AFTER_DEAD_END)
           {
-            PulseSnapshot pulses = getPulseSnapshot();
-            long travelAvg =
-                (absPulse(pulses.left) + absPulse(pulses.right)) / 2;
-
             debugSteerIR = 0;
             debugTotalSteer =
-                (int)(cfg.maze_dead_end_backup_pulses - travelAvg);
-
-            if (travelAvg >= cfg.maze_dead_end_backup_pulses)
+                (int)(backOneCellPulses(cfg) - averageTravelPulse());
+            if (updateBackDrive(cfg))
             {
               startMazePostBackupDecision();
-              break;
             }
-
-            int backupPwm =
-                constrain(cfg.maze_dead_end_backup_pwm, 0, cfg.Turn_Max);
-            int targetPwm_L = -backupPwm;
-            int targetPwm_R = -backupPwm;
-            int newPwm_L = applyRateLimit(targetPwm_L, pwmL, cfg.ramp_rate);
-            int newPwm_R = applyRateLimit(targetPwm_R, pwmR, cfg.ramp_rate);
-            setLeftMotor(newPwm_L);
-            setRightMotor(newPwm_R);
             break;
           }
 

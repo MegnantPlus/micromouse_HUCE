@@ -49,6 +49,7 @@ constexpr uint8_t MAZE_PATH_S = 2;
 constexpr uint8_t MAZE_PATH_W = 3;
 constexpr uint8_t MAZE_PATH_STOP = 4;
 constexpr uint8_t MAZE_PATH_EMPTY = 255;
+constexpr uint16_t MAZE_FLOOD_UNREACHABLE = 65535;
 
 enum RunState {
   IDLE,
@@ -60,9 +61,12 @@ enum RunState {
   TEST_R,
   TEST_TURN_L,
   TEST_TURN_R,
+  TEST_TURN_180,
   TEST_BACK_ONE_CELL,
+  MAP_SENSOR_DEBUG,
   PID_RUN_ONE_CELL,
   MAZE_RIGHT_HAND,
   MAZE_RIGHT_HAND_CELL,
-  MAZE_MATRIX_RUN
+  MAZE_MATRIX_RUN,
+  MAZE_FLOOD_RUN
 };

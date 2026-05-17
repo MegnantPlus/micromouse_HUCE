@@ -131,14 +131,29 @@ extern volatile int debugSteerIR;
 extern volatile int debugTotalSteer;
 
 extern uint8_t maze_wall_map[MAZE_GRID_W][MAZE_GRID_H];
+extern uint8_t maze_known_map[MAZE_GRID_W][MAZE_GRID_H];
 extern uint8_t maze_path_map[MAZE_GRID_W][MAZE_GRID_H];
+extern uint8_t maze_visit_count[MAZE_GRID_W][MAZE_GRID_H];
+extern uint16_t maze_dist_map[MAZE_GRID_W][MAZE_GRID_H];
 extern int maze_start_x;
 extern int maze_start_y;
 extern int maze_start_heading;
+extern int maze_goal_x;
+extern int maze_goal_y;
 extern volatile int debugMazeX;
 extern volatile int debugMazeY;
 extern volatile int debugMazeHeading;
 extern volatile int debugMazeNextDir;
+extern volatile int debugMapSenseSource;
+extern volatile int debugMapLeftDir;
+extern volatile int debugMapFrontDir;
+extern volatile int debugMapRightDir;
+extern volatile int debugMapLeftKnown;
+extern volatile int debugMapFrontKnown;
+extern volatile int debugMapRightKnown;
+extern volatile int debugMapLeftWall;
+extern volatile int debugMapFrontWall;
+extern volatile int debugMapRightWall;
 
 void resetMazeMaps();
 

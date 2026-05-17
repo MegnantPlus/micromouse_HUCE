@@ -159,29 +159,71 @@ volatile int debugSteerIR = 0;
 volatile int debugTotalSteer = 0;
 
 uint8_t maze_wall_map[MAZE_GRID_W][MAZE_GRID_H] = {};
+uint8_t maze_known_map[MAZE_GRID_W][MAZE_GRID_H] = {};
 uint8_t maze_path_map[MAZE_GRID_W][MAZE_GRID_H] = {};
+uint8_t maze_visit_count[MAZE_GRID_W][MAZE_GRID_H] = {};
+uint16_t maze_dist_map[MAZE_GRID_W][MAZE_GRID_H] = {};
 int maze_start_x = 0;
 int maze_start_y = 0;
 int maze_start_heading = MAZE_PATH_N;
+int maze_goal_x = MAZE_GRID_W / 2;
+int maze_goal_y = MAZE_GRID_H / 2;
 volatile int debugMazeX = -1;
 volatile int debugMazeY = -1;
 volatile int debugMazeHeading = MAZE_PATH_N;
 volatile int debugMazeNextDir = MAZE_PATH_EMPTY;
+volatile int debugMapSenseSource = 0;
+volatile int debugMapLeftDir = MAZE_PATH_W;
+volatile int debugMapFrontDir = MAZE_PATH_N;
+volatile int debugMapRightDir = MAZE_PATH_E;
+volatile int debugMapLeftKnown = 0;
+volatile int debugMapFrontKnown = 0;
+volatile int debugMapRightKnown = 0;
+volatile int debugMapLeftWall = 0;
+volatile int debugMapFrontWall = 0;
+volatile int debugMapRightWall = 0;
 
 void resetMazeMaps() {
   for (int y = 0; y < MAZE_GRID_H; y++) {
     for (int x = 0; x < MAZE_GRID_W; x++) {
       maze_wall_map[x][y] = 0;
+      maze_known_map[x][y] = 0;
       maze_path_map[x][y] = MAZE_PATH_EMPTY;
+      maze_visit_count[x][y] = 0;
+      maze_dist_map[x][y] = MAZE_FLOOD_UNREACHABLE;
     }
+  }
+  for (int x = 0; x < MAZE_GRID_W; x++) {
+    maze_wall_map[x][0] |= MAZE_WALL_S;
+    maze_known_map[x][0] |= MAZE_WALL_S;
+    maze_wall_map[x][MAZE_GRID_H - 1] |= MAZE_WALL_N;
+    maze_known_map[x][MAZE_GRID_H - 1] |= MAZE_WALL_N;
+  }
+  for (int y = 0; y < MAZE_GRID_H; y++) {
+    maze_wall_map[0][y] |= MAZE_WALL_W;
+    maze_known_map[0][y] |= MAZE_WALL_W;
+    maze_wall_map[MAZE_GRID_W - 1][y] |= MAZE_WALL_E;
+    maze_known_map[MAZE_GRID_W - 1][y] |= MAZE_WALL_E;
   }
   maze_start_x = 0;
   maze_start_y = 0;
   maze_start_heading = MAZE_PATH_N;
+  maze_goal_x = MAZE_GRID_W / 2;
+  maze_goal_y = MAZE_GRID_H / 2;
   debugMazeX = -1;
   debugMazeY = -1;
   debugMazeHeading = MAZE_PATH_N;
   debugMazeNextDir = MAZE_PATH_EMPTY;
+  debugMapSenseSource = 0;
+  debugMapLeftDir = MAZE_PATH_W;
+  debugMapFrontDir = MAZE_PATH_N;
+  debugMapRightDir = MAZE_PATH_E;
+  debugMapLeftKnown = 0;
+  debugMapFrontKnown = 0;
+  debugMapRightKnown = 0;
+  debugMapLeftWall = 0;
+  debugMapFrontWall = 0;
+  debugMapRightWall = 0;
 }
 
 RuntimeParams captureActiveRuntimeParams() {
