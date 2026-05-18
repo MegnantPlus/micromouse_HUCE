@@ -24,6 +24,7 @@ void copyRuntimeParamsFromGlobals(RuntimeParams &params) {
   params.ramp_rate = ramp_rate;
   params.k_gyro = k_gyro;
   params.k_ir = k_ir;
+  params.cell_center_gain = cell_center_gain;
   params.wall_steer_limit = wall_steer_limit;
   params.wheel_trim_L = wheel_trim_L;
   params.wheel_trim_R = wheel_trim_R;
@@ -63,6 +64,7 @@ void copyRuntimeParamsToGlobals(const RuntimeParams &params) {
   ramp_rate = params.ramp_rate;
   k_gyro = params.k_gyro;
   k_ir = params.k_ir;
+  cell_center_gain = params.cell_center_gain;
   wall_steer_limit = params.wall_steer_limit;
   wheel_trim_L = params.wheel_trim_L;
   wheel_trim_R = params.wheel_trim_R;
@@ -120,6 +122,7 @@ int wall_steer_limit = 22;
 int wheel_trim_L = 0;
 int wheel_trim_R = 0;
 float k_ir = 0.1; // Hệ số bám tường IR
+float cell_center_gain = 0.45f;
 int pulses_per_cell = 980;
 int front_stop_early_margin = 800;
 int maze_dead_end_backup_pulses = 980;

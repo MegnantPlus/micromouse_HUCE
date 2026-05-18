@@ -37,6 +37,7 @@ struct RuntimeParams {
 	int ramp_rate;
 	float k_gyro;
 	float k_ir;
+	float cell_center_gain;
 	int wall_steer_limit;
 	int wheel_trim_L;
 	int wheel_trim_R;
@@ -82,6 +83,7 @@ extern float min_vel;
 extern int ramp_rate;
 extern float k_gyro;
 extern float k_ir;
+extern float cell_center_gain;
 extern int wall_steer_limit;
 extern int wheel_trim_L;
 extern int wheel_trim_R;

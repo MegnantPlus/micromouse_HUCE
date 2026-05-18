@@ -36,6 +36,7 @@ void clampRuntimeParams() {
   accel_rate = max(0.01f, accel_rate);
   k_gyro = max(0.0f, k_gyro);
   k_ir = max(0.0f, k_ir);
+  cell_center_gain = constrain(cell_center_gain, 0.0f, 2.0f);
   wall_steer_limit = constrain(wall_steer_limit, 4, max(4, Turn_Max - Turn_Min));
   wheel_trim_L = constrain(wheel_trim_L, -60, 60);
   wheel_trim_R = constrain(wheel_trim_R, -60, 60);
@@ -73,6 +74,7 @@ void loadRuntimeParams() {
   ramp_rate = settings.getInt("ramp", ramp_rate);
   k_gyro = settings.getFloat("gyro", k_gyro);
   k_ir = settings.getFloat("irGain", k_ir);
+  cell_center_gain = settings.getFloat("cellCtr", cell_center_gain);
   wall_steer_limit = settings.getInt("wallMax", wall_steer_limit);
   wheel_trim_L = settings.getInt("trimL", wheel_trim_L);
   wheel_trim_R = settings.getInt("trimR", wheel_trim_R);
@@ -124,6 +126,7 @@ void saveRuntimeParams() {
   settings.putInt("ramp", ramp_rate);
   settings.putFloat("gyro", k_gyro);
   settings.putFloat("irGain", k_ir);
+  settings.putFloat("cellCtr", cell_center_gain);
   settings.putInt("wallMax", wall_steer_limit);
   settings.putInt("trimL", wheel_trim_L);
   settings.putInt("trimR", wheel_trim_R);
@@ -444,6 +447,7 @@ const char index_html[] PROGMEM = R"rawliteral(
         <label>V.Max <input type="number" id="vmax" step="0.1" value="15.0"></label>
         <label>V.Min <input type="number" id="vmin" step="0.1" value="5.0"></label>
         <label>Bam Tuong <input type="number" id="ir_gain" step="0.01" value="0.1"></label>
+        <label>Keo Giua O <input type="number" id="cell_center" step="0.01" value="0.45"></label>
         <label>Wall Max <input type="number" id="wall_steer" step="1" value="22"></label>
         <label>Trim L <input type="number" id="trim_l" step="1" value="0"></label>
         <label>Trim R <input type="number" id="trim_r" step="1" value="0"></label>
@@ -542,7 +546,7 @@ const char index_html[] PROGMEM = R"rawliteral(
     offUp: 'off_up', offLow: 'off_low', deadband: 'deadband', base: 'basepwm',
     kpL: 'kp_l', kiL: 'ki_l', kdL: 'kd_l', kpR: 'kp_r', kiR: 'ki_r',
     kdR: 'kd_r', accel: 'accel', vmax: 'vmax', vmin: 'vmin',
-    ramp: 'ramp', gyro: 'gyro', irGain: 'ir_gain', wallMax: 'wall_steer',
+    ramp: 'ramp', gyro: 'gyro', irGain: 'ir_gain', cellCenter: 'cell_center', wallMax: 'wall_steer',
     trimL: 'trim_l', trimR: 'trim_r', pwmMin: 'pwm_min', pwmMax: 'pwm_max',
     xungO: 'xung_o', frontMargin: 'front_margin', deadBack: 'dead_back',
     backupPwm: 'backup_pwm', turnLate: 'turn_late', turnDeg: 'turn_deg',
@@ -776,6 +780,7 @@ const char index_html[] PROGMEM = R"rawliteral(
       "ramp=" + val('ramp'),
       "gyro=" + val('gyro'),
       "irGain=" + val('ir_gain'),
+      "cellCenter=" + val('cell_center'),
       "wallMax=" + val('wall_steer'),
       "trimL=" + val('trim_l'),
       "trimR=" + val('trim_r'),
@@ -924,6 +929,7 @@ void handleSet() {
   if (server.hasArg("ramp")) ramp_rate = server.arg("ramp").toInt();
   if (server.hasArg("gyro")) k_gyro = server.arg("gyro").toFloat();
   if (server.hasArg("irGain")) k_ir = server.arg("irGain").toFloat();
+  if (server.hasArg("cellCenter")) cell_center_gain = server.arg("cellCenter").toFloat();
   if (server.hasArg("wallMax")) wall_steer_limit = server.arg("wallMax").toInt();
   if (server.hasArg("trimL")) wheel_trim_L = server.arg("trimL").toInt();
   if (server.hasArg("trimR")) wheel_trim_R = server.arg("trimR").toInt();
@@ -1153,7 +1159,7 @@ void handleData() {
   int liveAutoBias = debugGyroZAutoBiasActive;
   uint32_t liveAutoBiasMs = debugGyroZAutoBiasStillMs;
   int liveAutoBiasReason = debugGyroZAutoBiasReason;
-  char jsonBuf[2850];
+  char jsonBuf[3000];
   snprintf(jsonBuf, sizeof(jsonBuf),
            "{\"irL\":%d,\"irFL\":%d,\"irFR\":%d,\"irR\":%d,"
            "\"dL\":%d,\"dFL\":%d,\"dFR\":%d,\"dR\":%d,"
@@ -1175,7 +1181,7 @@ void handleData() {
            "\"kpL\":%.3f,\"kiL\":%.3f,\"kdL\":%.3f,"
            "\"kpR\":%.3f,\"kiR\":%.3f,\"kdR\":%.3f,"
            "\"accel\":%.2f,\"vmax\":%.1f,\"vmin\":%.1f,"
-           "\"ramp\":%d,\"gyro\":%.1f,\"irGain\":%.2f,"
+           "\"ramp\":%d,\"gyro\":%.1f,\"irGain\":%.2f,\"cellCenter\":%.2f,"
            "\"wallMax\":%d,\"trimL\":%d,\"trimR\":%d,"
            "\"pwmMin\":%d,\"pwmMax\":%d,"
            "\"xungO\":%d,\"frontMargin\":%d,\"turnLate\":%d,\"turnDeg\":%.1f,"
@@ -1205,6 +1211,7 @@ void handleData() {
            offset_upper, offset_lower,
            ir_deadband, base_pwm, Kp_L, Ki_L, Kd_L, Kp_R, Ki_R, Kd_R,
            accel_rate, max_vel, min_vel, ramp_rate, k_gyro, k_ir,
+           cell_center_gain,
            wall_steer_limit, wheel_trim_L, wheel_trim_R, Turn_Min, Turn_Max,
            pulses_per_cell, front_stop_early_margin, maze_turn_late_pulses,
            maze_turn_angle_deg, point_turn_backup_pulses,
